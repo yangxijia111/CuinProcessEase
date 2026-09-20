@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.Runtime.InteropServices;
 using CuinProcessEase.Core.Models;
+using CuinProcessEase.Windows.ProcessApi;
 using CuinProcessEase.Windows.Services;
 using Xunit;
 
@@ -239,15 +240,25 @@ public sealed class ProcessSnapshotServiceTests
     // ================= Phase 3：元数据读取 =================
 
     [Fact]
-    public async Task 命令行_当前进程可读取()
+    public async Task 命令行_默认快照不读取_字段保持null()
     {
+        // P3.1：WMI 已移出每秒快照热路径，默认 CaptureAsync 不查命令行
         ProcessSnapshotCollection snapshot = await CaptureAsync();
 
         ProcessSnapshot self = snapshot.Processes.Single(p => p.ProcessId == Environment.ProcessId);
+        Assert.Null(self.CommandLine);
+    }
 
-        // WMI 正常时自身命令行可读（testhost 启动命令行非空）
-        Assert.NotNull(self.CommandLine);
-        Assert.False(string.IsNullOrWhiteSpace(self.CommandLine));
+    [Fact]
+    public void 命令行_Provider按需读取当前进程成功()
+    {
+        // 独立 Provider（WMI Win32_Process）供详情页等按需调用
+        Dictionary<int, string?> commandLines = new ProcessCommandLineProvider().CaptureAll();
+
+        Assert.NotEmpty(commandLines);
+
+        Assert.True(commandLines.TryGetValue(Environment.ProcessId, out string? commandLine));
+        Assert.False(string.IsNullOrWhiteSpace(commandLine));
     }
 
     [Fact]

@@ -1,7 +1,6 @@
 using System.Collections.Concurrent;
 using System.ComponentModel;
 using System.Diagnostics;
-using System.Management;
 using System.Runtime.InteropServices;
 using System.Text;
 using CuinProcessEase.Core.Interfaces;
@@ -48,10 +47,9 @@ public sealed class ProcessSnapshotService : IProcessSnapshotService
             toolhelpEntries = new Dictionary<int, ToolhelpProcessEntry>();
         }
 
-        // 命令行来自 WMI Win32_Process（官方稳定只读接口，普通权限下仅能读到
-        // 当前用户/有权限进程；不注入、不开 DebugPrivilege、不解析 PEB）。
-        // WMI 不可用时返回空表，全部进程 CommandLine 为 null，不影响扫描
-        Dictionary<int, string?> commandLines = CaptureCommandLines();
+        // 命令行不在热路径读取：ProcessSnapshot.CommandLine 默认为 null。
+        // 需要命令行时由 ProcessCommandLineProvider（WMI Win32_Process）按需补读，
+        // 供未来详情页 / 命令行辅助分组使用
 
         Process[] processes = Process.GetProcesses();
         var snapshots = new List<ProcessSnapshot>(processes.Length);
@@ -64,7 +62,7 @@ public sealed class ProcessSnapshotService : IProcessSnapshotService
 
                 try
                 {
-                    snapshots.Add(CreateSnapshot(process, toolhelpEntries, commandLines));
+                    snapshots.Add(CreateSnapshot(process, toolhelpEntries));
                 }
                 catch
                 {
@@ -96,8 +94,7 @@ public sealed class ProcessSnapshotService : IProcessSnapshotService
 
     private static ProcessSnapshot CreateSnapshot(
         Process process,
-        IReadOnlyDictionary<int, ToolhelpProcessEntry> toolhelpEntries,
-        IReadOnlyDictionary<int, string?> commandLines)
+        IReadOnlyDictionary<int, ToolhelpProcessEntry> toolhelpEntries)
     {
         int pid = process.Id;
         toolhelpEntries.TryGetValue(pid, out ToolhelpProcessEntry? entry);
@@ -184,7 +181,6 @@ public sealed class ProcessSnapshotService : IProcessSnapshotService
             UserName = userName,
             Architecture = architecture,
             IsElevated = isElevated,
-            CommandLine = commandLines.TryGetValue(pid, out string? commandLine) ? commandLine : null,
             ProductName = productName,
             CompanyName = companyName,
             FileDescription = fileDescription,
@@ -247,49 +243,6 @@ public sealed class ProcessSnapshotService : IProcessSnapshotService
 
     private static string? OrNull(string? value)
         => string.IsNullOrWhiteSpace(value) ? null : value.Trim();
-
-    /// <summary>
-    /// 通过 WMI Win32_Process 一次性读取全部进程命令行（官方稳定只读接口）。
-    /// 任何系统级失败返回空表，CommandLine 全部保持 null，不影响扫描。
-    /// </summary>
-    private static Dictionary<int, string?> CaptureCommandLines()
-    {
-        var result = new Dictionary<int, string?>(256);
-        try
-        {
-            using ManagementObjectSearcher searcher = new(
-                "SELECT ProcessId, CommandLine FROM Win32_Process");
-
-            foreach (ManagementBaseObject managementObject in searcher.Get())
-            {
-                try
-                {
-                    object? pidValue = managementObject["ProcessId"];
-                    if (pidValue is null)
-                    {
-                        continue;
-                    }
-
-                    result[Convert.ToInt32(pidValue)] =
-                        managementObject["CommandLine"] as string;
-                }
-                catch
-                {
-                    // 单条记录损坏跳过，不影响其余
-                }
-                finally
-                {
-                    try { managementObject.Dispose(); } catch { /* 忽略 */ }
-                }
-            }
-        }
-        catch
-        {
-            // WMI 服务不可用等系统级失败：命令行整体缺失，安全降级
-        }
-
-        return result;
-    }
 
     /// <summary>
     /// 单字段安全读取：任何 Windows 权限 / 进程退出竞态异常都转为 null。

@@ -41,6 +41,7 @@ public static class ApplicationGroupingEngine
         }
 
         var union = new UnionFind(nodes.Count);
+        var relations = new List<Relation>(nodes.Count * 2);
 
         // ---- 阶段 1：树边关系（Verified 强依据 / Unverified 仅辅助） ----
         foreach (ProcessNode node in nodes)
@@ -50,35 +51,49 @@ public static class ApplicationGroupingEngine
                 continue;
             }
 
-            GenerateTreeEdgeRelation(node, nodeIndexByPid, union);
+            GenerateTreeEdgeRelation(node, nodeIndexByPid, relations);
         }
 
         // ---- 阶段 2：相同 exe 完整路径（同一软件多实例） ----
-        MergeSameExecutablePaths(nodes, nodeIndexByPid, union);
+        CollectSameExecutablePaths(nodes, nodeIndexByPid, relations);
 
         // ---- 阶段 3：相同的具体安装目录 ----
-        MergeSameInstallDirectories(nodes, nodeIndexByPid, union);
+        CollectSameInstallDirectories(nodes, nodeIndexByPid, relations);
 
         // ---- 阶段 4：相同有效产品名 + 相同公司名 ----
-        MergeSameProductAndCompany(nodes, nodeIndexByPid, union);
+        CollectSameProductAndCompany(nodes, nodeIndexByPid, relations);
 
-        // ---- 阶段 5：组装应用组 ----
+        // ---- 阶段 5：应用关系（最大生成树语义：按置信度降序应用）。
+        // 强桥优先生效；弱边仅在连接不同 component（成为必要桥）时才降低组置信度，
+        // 因此组的 Confidence 与关系应用顺序无关 ----
+        relations.Sort((x, y) => y.Confidence.CompareTo(x.Confidence));
+        foreach (Relation relation in relations)
+        {
+            union.Union(relation.A, relation.B, relation.Confidence, relation.Reasons);
+        }
+
+        // ---- 阶段 6：组装应用组 ----
         return AssembleGroups(snapshot, tree, nodes, nodeIndexByPid, union);
     }
+
+    /// <summary>一条候选合并关系。</summary>
+    private readonly record struct Relation(int A, int B, GroupingConfidence Confidence, GroupingReason Reasons);
 
     // ================= 关系规则（独立、可测） =================
 
     /// <summary>
-    /// 规则 A/B：进程树父子边。
-    /// - 双方均非歧义进程名 且 Verified → High（真实父子的强依据）；
-    /// - 其余情况（任一方歧义，或 Unverified）必须存在附加证据（同 exe / 同目录 / 同产品公司）
-    ///   才生成 Medium 关系；
-    /// - 无证据 → 不生成关系（宁拆不合）。
+    /// 规则 A/B：进程树父子边。真实父子关系不能等价为同一软件，
+    /// 任何树边（含 Verified）都必须有附加证据才允许合并：
+    /// - 附加证据 = SameExecutable / SameInstallDirectory / SameProduct+SameCompany，
+    ///   或 Verified 边 + 相同有效 CompanyName（允许 Medium）；
+    /// - Verified 边 + 强证据（同 exe / 同目录 / 同产品）→ High；
+    /// - Unverified 边 + 证据，或含歧义进程名（runtime/宿主/WebView2 等）→ 恒 Medium；
+    /// - 无任何证据 → 不生成关系（宁拆不合）。
     /// </summary>
     private static void GenerateTreeEdgeRelation(
         ProcessNode child,
         Dictionary<int, int> nodeIndexByPid,
-        UnionFind union)
+        List<Relation> relations)
     {
         ProcessNode parent = child.Parent!;
         ProcessSnapshot parentProcess = parent.Process;
@@ -90,28 +105,49 @@ public static class ApplicationGroupingEngine
 
         GroupingReason evidenceReasons = GetCommonEvidence(parentProcess, childProcess);
 
-        if (!ambiguous && verifiedEdge)
+        // 公司名单独相同：仅当边为 Verified 时作为最弱附加证据（Medium）；
+        // Unverified 边 + 仅公司相同不足以合并（同公司可能运行大量不同软件）
+        bool companyOnlyEvidence = false;
+        if (evidenceReasons == GroupingReason.None
+            && verifiedEdge
+            && !string.IsNullOrWhiteSpace(parentProcess.CompanyName)
+            && string.Equals(parentProcess.CompanyName, childProcess.CompanyName, StringComparison.OrdinalIgnoreCase))
         {
-            union.Union(
-                nodeIndexByPid[parent.ProcessId],
-                nodeIndexByPid[child.ProcessId],
-                GroupingConfidence.High,
-                GroupingReason.VerifiedParentChild | evidenceReasons);
-            return;
+            companyOnlyEvidence = true;
         }
 
-        if (evidenceReasons != GroupingReason.None)
+        if (evidenceReasons == GroupingReason.None && !companyOnlyEvidence)
         {
-            // 歧义进程或未验证的边：附加证据补强到 Medium
-            GroupingReason edgeReason = verifiedEdge
-                ? GroupingReason.VerifiedParentChild
-                : GroupingReason.UnverifiedParentChild;
-            union.Union(
-                nodeIndexByPid[parent.ProcessId],
-                nodeIndexByPid[child.ProcessId],
-                GroupingConfidence.Medium,
-                edgeReason | evidenceReasons);
+            return; // 证据不足，宁可拆开（如 IDE.exe → chrome.exe 即使 Verified 也不合并）
         }
+
+        GroupingReason edgeReason = verifiedEdge
+            ? GroupingReason.VerifiedParentChild
+            : GroupingReason.UnverifiedParentChild;
+
+        GroupingConfidence confidence;
+        if (companyOnlyEvidence)
+        {
+            confidence = GroupingConfidence.Medium;
+        }
+        else if (verifiedEdge && !ambiguous)
+        {
+            // Verified 父子 + 强证据（同 exe / 同目录 / 同产品公司）
+            confidence = GroupingConfidence.High;
+        }
+        else
+        {
+            // Unverified 边 + 证据，或歧义进程（runtime / 宿主 / 共享组件）：恒 Medium
+            confidence = GroupingConfidence.Medium;
+        }
+
+        GroupingReason evidencePart = companyOnlyEvidence ? GroupingReason.SameCompany : evidenceReasons;
+
+        relations.Add(new Relation(
+            nodeIndexByPid[parent.ProcessId],
+            nodeIndexByPid[child.ProcessId],
+            confidence,
+            edgeReason | evidencePart));
     }
 
     /// <summary>
@@ -157,17 +193,17 @@ public static class ApplicationGroupingEngine
     /// 歧义进程名（python.exe / svchost.exe 等通用运行时与宿主）不参与：
     /// 同一路径的多个 python/cmd 实例是不同任务，绝不因同路径合并。
     /// </summary>
-    private static void MergeSameExecutablePaths(
+    private static void CollectSameExecutablePaths(
         List<ProcessNode> nodes,
         Dictionary<int, int> nodeIndexByPid,
-        UnionFind union)
+        List<Relation> relations)
     {
         foreach (IGrouping<string, ProcessNode> group in nodes
                      .Where(n => !string.IsNullOrWhiteSpace(n.Process.ExecutablePath))
                      .Where(n => !ProcessNameRules.IsAmbiguousProcessName(n.Process.Name))
                      .GroupBy(n => n.Process.ExecutablePath!, StringComparer.OrdinalIgnoreCase))
         {
-            ChainUnion(group, nodeIndexByPid, union, GroupingConfidence.High, GroupingReason.SameExecutable);
+            ChainCollect(group, nodeIndexByPid, relations, GroupingConfidence.High, GroupingReason.SameExecutable);
         }
     }
 
@@ -175,10 +211,10 @@ public static class ApplicationGroupingEngine
     /// 相同的具体安装目录（黑名单目录不算）→ Medium。
     /// 歧义进程名同样不参与。
     /// </summary>
-    private static void MergeSameInstallDirectories(
+    private static void CollectSameInstallDirectories(
         List<ProcessNode> nodes,
         Dictionary<int, int> nodeIndexByPid,
-        UnionFind union)
+        List<Relation> relations)
     {
         var nodesByDirectory = new Dictionary<string, List<ProcessNode>>(StringComparer.OrdinalIgnoreCase);
 
@@ -220,7 +256,7 @@ public static class ApplicationGroupingEngine
                 continue;
             }
 
-            ChainUnion(members, nodeIndexByPid, union, GroupingConfidence.Medium, GroupingReason.SameInstallDirectory);
+            ChainCollect(members, nodeIndexByPid, relations, GroupingConfidence.Medium, GroupingReason.SameInstallDirectory);
         }
     }
 
@@ -240,10 +276,10 @@ public static class ApplicationGroupingEngine
     /// 产品名单独相同仅 Low 不足以合并；公司名单独相同永远不足以合并。
     /// 歧义进程名不参与。
     /// </summary>
-    private static void MergeSameProductAndCompany(
+    private static void CollectSameProductAndCompany(
         List<ProcessNode> nodes,
         Dictionary<int, int> nodeIndexByPid,
-        UnionFind union)
+        List<Relation> relations)
     {
         foreach (IGrouping<(string Product, string Company), ProcessNode> group in nodes
                      .Where(n => ProcessNameRules.IsValidProductName(n.Process.ProductName,
@@ -253,16 +289,16 @@ public static class ApplicationGroupingEngine
                      .GroupBy(n => (n.Process.ProductName!.Trim().ToLowerInvariant(),
                                     n.Process.CompanyName!.Trim().ToLowerInvariant())))
         {
-            ChainUnion(group, nodeIndexByPid, union, GroupingConfidence.Medium,
+            ChainCollect(group, nodeIndexByPid, relations, GroupingConfidence.Medium,
                 GroupingReason.SameProduct | GroupingReason.SameCompany);
         }
     }
 
-    /// <summary>把同组节点链式合并（第 i 个与第 i-1 个合并），保持 O(n)。</summary>
-    private static void ChainUnion(
+    /// <summary>把同组节点链式收集为相邻关系（第 i 个与第 i-1 个），保持 O(n)。</summary>
+    private static void ChainCollect(
         IEnumerable<ProcessNode> groupNodes,
         Dictionary<int, int> nodeIndexByPid,
-        UnionFind union,
+        List<Relation> relations,
         GroupingConfidence confidence,
         GroupingReason reason)
     {
@@ -272,7 +308,7 @@ public static class ApplicationGroupingEngine
             int index = nodeIndexByPid[node.ProcessId];
             if (previous is { } prev)
             {
-                union.Union(prev, index, confidence, reason);
+                relations.Add(new Relation(prev, index, confidence, reason));
             }
 
             previous = index;
@@ -352,42 +388,59 @@ public static class ApplicationGroupingEngine
             .ToList();
     }
 
-    /// <summary>构建应用身份：显示名按 ProductName → FileDescription → 根进程名回退。</summary>
+    /// <summary>
+    /// 构建应用身份：以 Root 为中心，避免大量 helper 的元数据覆盖宿主真实身份。
+    /// DisplayName 优先级：Root ProductName → Root FileDescription → Root 进程名
+    /// → 组内多数 ProductName → Unknown。
+    /// InstallDirectory 优先取 primary Root / MainExecutable 所在目录。
+    /// </summary>
     private static ApplicationIdentity BuildIdentity(
         IReadOnlyList<ProcessSnapshot> processes,
         IReadOnlyList<ProcessSnapshot> rootProcesses)
     {
         ProcessSnapshot primary = rootProcesses.Count > 0 ? rootProcesses[0] : processes[0];
 
-        // 产品名：组内多数一致的有效值
-        string? productName = MajorityValue(
+        // ---- Root 优先的身份解析（多 Root 时取第一个可用的 Root 身份） ----
+        string? rootProductName = null;
+        string? rootFileDescription = null;
+        foreach (ProcessSnapshot root in rootProcesses.Count > 0 ? rootProcesses : new[] { primary })
+        {
+            string? exeName = ProcessNameRules.GetFileName(root.ExecutablePath);
+            if (rootProductName is null
+                && ProcessNameRules.IsValidProductName(root.ProductName, exeName))
+            {
+                rootProductName = root.ProductName!.Trim();
+            }
+
+            if (rootFileDescription is null
+                && ProcessNameRules.IsValidProductName(root.FileDescription, exeName))
+            {
+                rootFileDescription = root.FileDescription!.Trim();
+            }
+        }
+
+        // 组内多数产品名（仅作 Root 无身份时的第 4 级 fallback）
+        string? groupProductName = MajorityValue(
             processes,
             p => ProcessNameRules.IsValidProductName(p.ProductName, ProcessNameRules.GetFileName(p.ExecutablePath))
                 ? p.ProductName!.Trim()
                 : null);
 
-        string? company = MajorityValue(processes, p => p.CompanyName);
+        string displayName =
+            rootProductName
+            ?? rootFileDescription
+            ?? (string.Equals(primary.Name, "Unknown", StringComparison.OrdinalIgnoreCase)
+                ? groupProductName
+                : primary.Name.EndsWith(".exe", StringComparison.OrdinalIgnoreCase)
+                    ? primary.Name[..^4]
+                    : primary.Name)
+            ?? groupProductName
+            ?? "Unknown";
 
-        // 显示名：ProductName → 根进程 FileDescription → 根进程名（去 .exe）
-        string displayName;
-        if (productName is not null)
-        {
-            displayName = productName;
-        }
-        else if (ProcessNameRules.IsValidProductName(primary.FileDescription, ProcessNameRules.GetFileName(primary.ExecutablePath)))
-        {
-            displayName = primary.FileDescription!.Trim();
-        }
-        else if (!string.Equals(primary.Name, "Unknown", StringComparison.OrdinalIgnoreCase))
-        {
-            displayName = primary.Name.EndsWith(".exe", StringComparison.OrdinalIgnoreCase)
-                ? primary.Name[..^4]
-                : primary.Name;
-        }
-        else
-        {
-            displayName = "Unknown";
-        }
+        string? productName = rootProductName ?? groupProductName;
+        string? company = rootProcesses.Count > 0 && !string.IsNullOrWhiteSpace(primary.CompanyName)
+            ? primary.CompanyName.Trim()
+            : MajorityValue(processes, p => p.CompanyName);
 
         // 主 exe：全部根进程路径一致且非空时才确定，否则 null（宁缺毋错）
         string? mainExecutable = null;
@@ -401,10 +454,10 @@ public static class ApplicationGroupingEngine
             mainExecutable = rootPaths[0];
         }
 
-        // 安装目录：组内多数一致的具体目录
-        string? installDirectory = MajorityValue(
-            processes,
-            p => InstallDirectoryRules.GetApplicationDirectory(p.ExecutablePath));
+        // 安装目录：直接取 primary Root（或 MainExecutable）所在目录，
+        // 绝不让大量 helper 的目录以多数票覆盖宿主目录；Root 无路径时为 null
+        string? installDirectory = InstallDirectoryRules.GetApplicationDirectory(
+            mainExecutable ?? primary.ExecutablePath);
 
         return new ApplicationIdentity
         {
@@ -443,7 +496,12 @@ public static class ApplicationGroupingEngine
             .First().Key;
     }
 
-    /// <summary>带组元数据（最高可信度 / 依据并集）的并查集。</summary>
+    /// <summary>
+    /// 带组元数据的并查集。组 Confidence 语义为"把整个组连接起来的最弱有效合并关系"
+    ///（生成树最弱边）：A-B(High) + B-C(Medium) → 组为 Medium。
+    /// Unknown（单节点、尚无任何关系）不参与降低；同 component 内的额外弱边只是冗余
+    /// 路径（不改变生成树），只累计 Reasons、不降级已有 Confidence。
+    /// </summary>
     private sealed class UnionFind
     {
         private readonly int[] _parent;
@@ -484,7 +542,7 @@ public static class ApplicationGroupingEngine
             int rootB = Find(b);
             if (rootA == rootB)
             {
-                _confidence[rootA] = Max(_confidence[rootA], confidence);
+                // 冗余边（已成环）：只累计依据，不降低已有组置信度
                 _reasons[rootA] |= reasons;
                 return;
             }
@@ -496,7 +554,7 @@ public static class ApplicationGroupingEngine
             }
 
             _parent[rootB] = rootA;
-            _confidence[rootA] = Max(_confidence[rootA], Max(_confidence[rootB], confidence));
+            _confidence[rootA] = WeakestBridge(_confidence[rootA], _confidence[rootB], confidence);
             _reasons[rootA] |= _reasons[rootB] | reasons;
         }
 
@@ -504,7 +562,27 @@ public static class ApplicationGroupingEngine
 
         public GroupingReason GetReasons(int root) => _reasons[root];
 
-        private static GroupingConfidence Max(GroupingConfidence a, GroupingConfidence b)
-            => a >= b ? a : b;
+        /// <summary>
+        /// 新 component 的最弱桥 = min(两侧既有有效置信度, 本次边)。
+        /// Unknown（单节点）视为"无既有关系"，不参与降低。
+        /// </summary>
+        private static GroupingConfidence WeakestBridge(
+            GroupingConfidence left,
+            GroupingConfidence right,
+            GroupingConfidence bridge)
+        {
+            GroupingConfidence result = bridge;
+            if (left != GroupingConfidence.Unknown && left < result)
+            {
+                result = left;
+            }
+
+            if (right != GroupingConfidence.Unknown && right < result)
+            {
+                result = right;
+            }
+
+            return result;
+        }
     }
 }

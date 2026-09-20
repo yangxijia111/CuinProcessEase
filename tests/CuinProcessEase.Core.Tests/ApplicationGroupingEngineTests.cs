@@ -177,18 +177,49 @@ public sealed class ApplicationGroupingEngineTests
         Assert.All(groups, g => Assert.Single(g.Processes));
     }
 
-    // 7. Verified Parent + 不同 exe → 可合并（High）
+    // 7a. Verified Parent + 不同 exe 且无附加证据 → 不得合并（P3.1 加固）
     [Fact]
-    public void Verified父子不同exe_High合并()
+    public void Verified父子不同exe无证据_不得合并()
     {
+        // IDE 启动浏览器：真实父子但不是同一软件
         IReadOnlyList<ApplicationGroup> groups = Group(
-            Snap(100, null, "launcher.exe", @"C:\Program Files\Game\launcher.exe", BaseTime, "Cool Game", "GameSoft"),
-            Snap(200, 100, "worker.exe", @"C:\Program Files\Game\bin\worker.exe", BaseTime.AddSeconds(1)));
+            Snap(100, null, "IDE.exe", @"C:\Program Files\IDE\IDE.exe", BaseTime, "My IDE", "IDE Corp"),
+            Snap(200, 100, "chrome.exe", @"C:\Program Files\Google\Chrome\Application\chrome.exe",
+                BaseTime.AddSeconds(1), "Google Chrome", "Google LLC"));
+
+        Assert.Equal(2, groups.Count);
+        Assert.All(groups, g => Assert.Single(g.Processes));
+    }
+
+    // 7b. Verified Parent + 不同 exe + 同目录证据 → High 合并
+    [Fact]
+    public void Verified父子不同exe同目录_High合并()
+    {
+        const string dir = @"C:\Program Files\Game";
+
+        IReadOnlyList<ApplicationGroup> groups = Group(
+            Snap(100, null, "launcher.exe", $@"{dir}\launcher.exe", BaseTime, "Cool Game", "GameSoft"),
+            Snap(200, 100, "worker.exe", $@"{dir}\worker.exe", BaseTime.AddSeconds(1)));
 
         ApplicationGroup group = Assert.Single(groups);
         Assert.Equal(2, group.ProcessCount);
         Assert.Equal(GroupingConfidence.High, group.Confidence);
         Assert.True(group.Reasons.HasFlag(GroupingReason.VerifiedParentChild));
+        Assert.True(group.Reasons.HasFlag(GroupingReason.SameInstallDirectory));
+    }
+
+    // 7c. Verified 父子 + 仅公司相同 → 允许 Medium 合并
+    [Fact]
+    public void Verified父子仅公司相同_Medium合并()
+    {
+        IReadOnlyList<ApplicationGroup> groups = Group(
+            Snap(100, null, "launcher.exe", @"C:\Program Files\Game\launcher.exe", BaseTime, "Cool Game", "GameSoft"),
+            Snap(200, 100, "worker.exe", @"C:\Program Files\Game\bin\worker.exe", BaseTime.AddSeconds(1), null, "GameSoft"));
+
+        ApplicationGroup group = Assert.Single(groups);
+        Assert.Equal(2, group.ProcessCount);
+        Assert.Equal(GroupingConfidence.Medium, group.Confidence);
+        Assert.True(group.Reasons.HasFlag(GroupingReason.SameCompany));
     }
 
     // 8. Unverified Parent 单独存在 → 不足以强制合并
@@ -309,7 +340,134 @@ public sealed class ApplicationGroupingEngineTests
         Assert.Equal(chromeExe, chrome.Identity.MainExecutable);
     }
 
-    // ================= 核心不变量 =================
+    // ================= P3.1 加固回归 =================
+
+    // Group Confidence = 组内最弱有效合并关系（weakest bridge）
+    [Fact]
+    public void 最弱桥语义_High与Medium组成的组为Medium()
+    {
+        const string dir = @"C:\Program Files\AppX";
+
+        // app↔app2 同路径 High；helper 与 app2 Unverified+同目录 Medium 桥
+        IReadOnlyList<ApplicationGroup> groups = Group(
+            Snap(100, null, "app.exe", $@"{dir}\app.exe", BaseTime, "AppX", "AppX Corp"),
+            Snap(200, null, "app2.exe", $@"{dir}\app2.exe", BaseTime.AddSeconds(1)), // 同目录 Medium
+            Snap(300, 200, "helper.exe", $@"{dir}\helper.exe", null));              // Unverified+同目录 Medium
+
+        ApplicationGroup group = Assert.Single(groups);
+        Assert.Equal(3, group.ProcessCount);
+        // 同目录 Medium 桥存在 → 组整体不超过 Medium（最弱桥）
+        Assert.Equal(GroupingConfidence.Medium, group.Confidence);
+    }
+
+    [Fact]
+    public void 最弱桥语义_全High链保持High()
+    {
+        const string exe = @"C:\Program Files\Chrome\chrome.exe";
+
+        // 同路径 High + Verified+SameExecutable High → 组 High
+        IReadOnlyList<ApplicationGroup> groups = Group(
+            Snap(100, null, "chrome.exe", exe, BaseTime, "Chrome", "Google LLC"),
+            Snap(200, 100, "chrome.exe", exe, BaseTime.AddSeconds(1), "Chrome", "Google LLC"));
+
+        ApplicationGroup group = Assert.Single(groups);
+        Assert.Equal(GroupingConfidence.High, group.Confidence);
+    }
+
+    // 同 component 的冗余弱边不降级已有组
+    [Fact]
+    public void 冗余弱边_不降低组置信度()
+    {
+        const string exe = @"C:\Program Files\App\app.exe";
+
+        // 三个同路径进程（High 链）；100→200 另有 Unverified 树边（Medium，冗余路径）
+        IReadOnlyList<ApplicationGroup> groups = Group(
+            Snap(100, null, "app.exe", exe, BaseTime, "App", "App Corp"),
+            Snap(200, 100, "app.exe", exe, null),   // 时间未知 → Unverified 边 + SameExecutable
+            Snap(300, null, "app.exe", exe, BaseTime.AddSeconds(2), "App", "App Corp"));
+
+        ApplicationGroup group = Assert.Single(groups);
+        Assert.Equal(3, group.ProcessCount);
+        // 冗余 Medium 边不把 High 组降级
+        Assert.Equal(GroupingConfidence.High, group.Confidence);
+    }
+
+    // WebView2 多宿主：不同宿主各自通过进程树+公司证据收编 webview，不全局串组
+    [Fact]
+    public void WebView2多宿主_不得因同路径全局合并()
+    {
+        const string webviewExe = @"C:\Program Files (x86)\Microsoft\EdgeWebView\Application\1.0\msedgewebview2.exe";
+
+        IReadOnlyList<ApplicationGroup> groups = Group(
+            // 宿主一：SearchHost（微软系，与 webview 有共同公司证据）
+            Snap(100, null, "SearchHost.exe", @"C:\Windows\System32\SearchHost.exe", BaseTime,
+                "Microsoft® Windows® Operating System", "Microsoft Corporation"),
+            Snap(110, 100, "msedgewebview2.exe", webviewExe, BaseTime.AddSeconds(1),
+                "Microsoft Edge WebView2", "Microsoft Corporation"),
+            Snap(111, 100, "msedgewebview2.exe", webviewExe, BaseTime.AddSeconds(2),
+                "Microsoft Edge WebView2", "Microsoft Corporation"),
+            // 宿主二：另一个微软系宿主（与 webview 有共同公司证据）
+            Snap(200, null, "WidgetHost.exe", @"C:\Windows\System32\WidgetHost.exe", BaseTime,
+                "Microsoft® Windows® Operating System", "Microsoft Corporation"),
+            Snap(210, 200, "msedgewebview2.exe", webviewExe, BaseTime.AddSeconds(1),
+                "Microsoft Edge WebView2", "Microsoft Corporation"),
+            Snap(211, 200, "msedgewebview2.exe", webviewExe, BaseTime.AddSeconds(2),
+                "Microsoft Edge WebView2", "Microsoft Corporation"));
+
+        // 两个宿主各自成组：webview 不因 SameExecutable 跨宿主合并（否则会串成一组）
+        Assert.Equal(2, groups.Count);
+        Assert.All(groups, g => Assert.Equal(3, g.ProcessCount));
+
+        ApplicationGroup searchHost = groups.Single(g => g.Processes.Any(p => p.Name == "SearchHost.exe"));
+        ApplicationGroup widgetHost = groups.Single(g => g.Processes.Any(p => p.Name == "WidgetHost.exe"));
+
+        // 应用身份来自各自宿主而非 webview
+        Assert.Equal("SearchHost", searchHost.Identity.DisplayName);
+        Assert.Equal("WidgetHost", widgetHost.Identity.DisplayName);
+        // 宿主目录不被 webview 目录覆盖
+        Assert.Equal(@"C:\Windows\System32", searchHost.Identity.InstallDirectory);
+        Assert.Equal(@"C:\Windows\System32", widgetHost.Identity.InstallDirectory);
+    }
+
+    // 第三方宿主与 webview 无任何共同证据（公司不同）→ 宁拆不合，webview 独立
+    [Fact]
+    public void 第三方宿主无共同证据_webview保持独立()
+    {
+        const string webviewExe = @"C:\Program Files (x86)\Microsoft\EdgeWebView\Application\1.0\msedgewebview2.exe";
+
+        IReadOnlyList<ApplicationGroup> groups = Group(
+            Snap(200, null, "MyApp.exe", @"C:\Program Files\MyApp\MyApp.exe", BaseTime, "My App", "My Company"),
+            Snap(210, 200, "msedgewebview2.exe", webviewExe, BaseTime.AddSeconds(1),
+                "Microsoft Edge WebView2", "Microsoft Corporation"));
+
+        // 无目录/产品/公司证据：即使 Verified 父子也宁可拆开
+        Assert.Equal(2, groups.Count);
+        Assert.All(groups, g => Assert.Single(g.Processes));
+    }
+
+    // 应用身份以 Root 为中心：helper 数量不能覆盖宿主身份
+    [Fact]
+    public void 应用身份_Root优先_不被helper覆盖()
+    {
+        const string helperDir = @"C:\Program Files (x86)\Microsoft\EdgeWebView\Application\1.0";
+
+        IReadOnlyList<ApplicationGroup> groups = Group(
+            Snap(100, null, "SearchHost.exe", @"C:\Windows\System32\SearchHost.exe", BaseTime,
+                "Microsoft® Windows® Operating System", "Microsoft Corporation"),
+            Snap(110, 100, "msedgewebview2.exe", $@"{helperDir}\msedgewebview2.exe", BaseTime.AddSeconds(1),
+                "Microsoft Edge WebView2", "Microsoft Corporation"),
+            Snap(111, 100, "msedgewebview2.exe", $@"{helperDir}\msedgewebview2.exe", BaseTime.AddSeconds(2),
+                "Microsoft Edge WebView2", "Microsoft Corporation"),
+            Snap(112, 100, "msedgewebview2.exe", $@"{helperDir}\msedgewebview2.exe", BaseTime.AddSeconds(3),
+                "Microsoft Edge WebView2", "Microsoft Corporation"));
+
+        ApplicationGroup group = Assert.Single(groups);
+        Assert.Equal(4, group.ProcessCount);
+
+        // DisplayName 链：Root ProductName（泛化无效）→ Root FileDescription（无）→ Root 进程名
+        Assert.Equal("SearchHost", group.Identity.DisplayName);
+        Assert.False(group.Identity.DisplayName.Contains("WebView", StringComparison.OrdinalIgnoreCase));
+    }
 
     [Fact]
     public void 所有输入进程恰好属于一个组_不丢失不重复()

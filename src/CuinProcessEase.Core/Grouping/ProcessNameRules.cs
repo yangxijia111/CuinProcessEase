@@ -9,8 +9,10 @@ namespace CuinProcessEase.Core.Grouping;
 public static class ProcessNameRules
 {
     /// <summary>
-    /// 歧义进程名集合：通用语言运行时 + 通用 Shell 宿主 + 常驻系统宿主。
-    /// 这些进程作为父节点或同路径实例时，都不能仅凭树边/路径直接传递"同应用"关系。
+    /// 歧义进程名集合：通用语言运行时 + 通用 Shell 宿主 + 常驻系统宿主 + 共享组件。
+    /// 这些进程作为父节点或同路径实例时，都不能仅凭树边/路径直接传递"同应用"关系；
+    /// 共享组件（如 msedgewebview2）被多个宿主使用时，绝不能因 SameExecutable 全局合并，
+    /// 只能通过各自宿主的进程树 + 辅助证据分别进入对应宿主组。
     /// </summary>
     private static readonly HashSet<string> AmbiguousProcessNames = new(StringComparer.OrdinalIgnoreCase)
     {
@@ -22,6 +24,9 @@ public static class ProcessNameRules
         "explorer.exe", "svchost.exe", "services.exe", "smss.exe", "csrss.exe",
         "wininit.exe", "winlogon.exe", "dwm.exe", "sihost.exe", "taskhostw.exe",
         "runtimebroker.exe", "ctfmon.exe", "dllhost.exe", "wermgr.exe",
+        // 共享运行时 / 系统加载器 / 错误报告 / 后台宿主
+        "msedgewebview2.exe", "rundll32.exe", "msiexec.exe", "werfault.exe", "werfaultsecure.exe",
+        "backgroundtaskhost.exe", "applicationframehost.exe",
     };
 
     /// <summary>
