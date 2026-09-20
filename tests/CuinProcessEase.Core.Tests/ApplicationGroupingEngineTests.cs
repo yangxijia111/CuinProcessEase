@@ -80,16 +80,17 @@ public sealed class ApplicationGroupingEngineTests
         Assert.Equal("Discord", discord.Identity.DisplayName);
     }
 
-    // 3. Launcher + Helper：Steam → steamwebhelper（Verified，不同 exe）
+    // 3. Launcher + Helper：Steam → steamwebhelper（Verified，同产品可合并）
     [Fact]
-    public void Launcher与Helper_Verified父子不同exe可合并()
+    public void Launcher与Helper_Verified父子同产品合并()
     {
         const string steamDir = @"C:\Program Files (x86)\Steam";
 
         IReadOnlyList<ApplicationGroup> groups = Group(
             Snap(100, null, "steam.exe", $@"{steamDir}\steam.exe", BaseTime, "Steam Client", "Valve Corporation"),
+            // 同产品（Steam 客户端组件）即使目录不同，Verified 树边 + 同产品同公司可合并
             Snap(200, 100, "steamwebhelper.exe", $@"{steamDir}\bin\cef\cef.win7x64\steamwebhelper.exe",
-                BaseTime.AddSeconds(3), "Steam Web Helper", "Valve Corporation"),
+                BaseTime.AddSeconds(3), "Steam Client", "Valve Corporation"),
             // 同目录 updater（无树边）→ SameInstallDirectory Medium
             Snap(300, null, "updater.exe", $@"{steamDir}\updater.exe", BaseTime.AddSeconds(1), null, "Valve Corporation"));
 
@@ -97,6 +98,7 @@ public sealed class ApplicationGroupingEngineTests
         Assert.Equal(3, steam.ProcessCount);
         Assert.Equal(2, steam.RootProcesses.Count); // steam.exe 与 updater.exe 都是组内根
         Assert.True(steam.Reasons.HasFlag(GroupingReason.SameInstallDirectory));
+        Assert.True(steam.Reasons.HasFlag(GroupingReason.SameProduct));
     }
 
     // 4. 同目录多个相关 exe
@@ -208,18 +210,17 @@ public sealed class ApplicationGroupingEngineTests
         Assert.True(group.Reasons.HasFlag(GroupingReason.SameInstallDirectory));
     }
 
-    // 7c. Verified 父子 + 仅公司相同 → 允许 Medium 合并
+    // 7c. Verified 父子 + 仅公司相同 → 不得合并（P4 收紧：Company 永不单独触发合并）
     [Fact]
-    public void Verified父子仅公司相同_Medium合并()
+    public void Verified父子仅公司相同_不得合并()
     {
+        // 同为 Microsoft Corporation 的 Word → Excel 不能仅因此归为同一应用
         IReadOnlyList<ApplicationGroup> groups = Group(
             Snap(100, null, "launcher.exe", @"C:\Program Files\Game\launcher.exe", BaseTime, "Cool Game", "GameSoft"),
             Snap(200, 100, "worker.exe", @"C:\Program Files\Game\bin\worker.exe", BaseTime.AddSeconds(1), null, "GameSoft"));
 
-        ApplicationGroup group = Assert.Single(groups);
-        Assert.Equal(2, group.ProcessCount);
-        Assert.Equal(GroupingConfidence.Medium, group.Confidence);
-        Assert.True(group.Reasons.HasFlag(GroupingReason.SameCompany));
+        Assert.Equal(2, groups.Count);
+        Assert.All(groups, g => Assert.Single(g.Processes));
     }
 
     // 8. Unverified Parent 单独存在 → 不足以强制合并
@@ -392,41 +393,32 @@ public sealed class ApplicationGroupingEngineTests
         Assert.Equal(GroupingConfidence.High, group.Confidence);
     }
 
-    // WebView2 多宿主：不同宿主各自通过进程树+公司证据收编 webview，不全局串组
+    // WebView2 多宿主：webview 与宿主无强证据（公司不同或产品不同）时各自独立，
+    // 绝不因 SameExecutable 跨宿主全局合并
     [Fact]
     public void WebView2多宿主_不得因同路径全局合并()
     {
         const string webviewExe = @"C:\Program Files (x86)\Microsoft\EdgeWebView\Application\1.0\msedgewebview2.exe";
 
         IReadOnlyList<ApplicationGroup> groups = Group(
-            // 宿主一：SearchHost（微软系，与 webview 有共同公司证据）
+            // 宿主一：SearchHost（与 webview 无产品/目录证据，公司单独不足以合并）
             Snap(100, null, "SearchHost.exe", @"C:\Windows\System32\SearchHost.exe", BaseTime,
                 "Microsoft® Windows® Operating System", "Microsoft Corporation"),
             Snap(110, 100, "msedgewebview2.exe", webviewExe, BaseTime.AddSeconds(1),
                 "Microsoft Edge WebView2", "Microsoft Corporation"),
-            Snap(111, 100, "msedgewebview2.exe", webviewExe, BaseTime.AddSeconds(2),
-                "Microsoft Edge WebView2", "Microsoft Corporation"),
-            // 宿主二：另一个微软系宿主（与 webview 有共同公司证据）
-            Snap(200, null, "WidgetHost.exe", @"C:\Windows\System32\WidgetHost.exe", BaseTime,
-                "Microsoft® Windows® Operating System", "Microsoft Corporation"),
+            // 宿主二：第三方应用
+            Snap(200, null, "MyApp.exe", @"C:\Program Files\MyApp\MyApp.exe", BaseTime, "My App", "My Company"),
             Snap(210, 200, "msedgewebview2.exe", webviewExe, BaseTime.AddSeconds(1),
-                "Microsoft Edge WebView2", "Microsoft Corporation"),
-            Snap(211, 200, "msedgewebview2.exe", webviewExe, BaseTime.AddSeconds(2),
                 "Microsoft Edge WebView2", "Microsoft Corporation"));
 
-        // 两个宿主各自成组：webview 不因 SameExecutable 跨宿主合并（否则会串成一组）
-        Assert.Equal(2, groups.Count);
-        Assert.All(groups, g => Assert.Equal(3, g.ProcessCount));
+        // P4 收紧后（Company 不再单独触发合并）：
+        // 两个宿主各自单进程组；webview 们不因 SameExecutable 串成一组
+        Assert.Equal(4, groups.Count);
+        Assert.All(groups, g => Assert.Single(g.Processes));
 
-        ApplicationGroup searchHost = groups.Single(g => g.Processes.Any(p => p.Name == "SearchHost.exe"));
-        ApplicationGroup widgetHost = groups.Single(g => g.Processes.Any(p => p.Name == "WidgetHost.exe"));
-
-        // 应用身份来自各自宿主而非 webview
-        Assert.Equal("SearchHost", searchHost.Identity.DisplayName);
-        Assert.Equal("WidgetHost", widgetHost.Identity.DisplayName);
-        // 宿主目录不被 webview 目录覆盖
-        Assert.Equal(@"C:\Windows\System32", searchHost.Identity.InstallDirectory);
-        Assert.Equal(@"C:\Windows\System32", widgetHost.Identity.InstallDirectory);
+        // 没有任何组同时包含两个宿主或跨宿主的 webview
+        Assert.DoesNotContain(groups, g => g.Processes.Any(p => p.Name == "SearchHost.exe")
+                                         && g.Processes.Any(p => p.Name == "MyApp.exe"));
     }
 
     // 第三方宿主与 webview 无任何共同证据（公司不同）→ 宁拆不合，webview 独立
@@ -451,22 +443,24 @@ public sealed class ApplicationGroupingEngineTests
     {
         const string helperDir = @"C:\Program Files (x86)\Microsoft\EdgeWebView\Application\1.0";
 
+        // Root 与 helper 同产品（收编证据），但 helper 元数据不能覆盖宿主身份
         IReadOnlyList<ApplicationGroup> groups = Group(
-            Snap(100, null, "SearchHost.exe", @"C:\Windows\System32\SearchHost.exe", BaseTime,
-                "Microsoft® Windows® Operating System", "Microsoft Corporation"),
-            Snap(110, 100, "msedgewebview2.exe", $@"{helperDir}\msedgewebview2.exe", BaseTime.AddSeconds(1),
-                "Microsoft Edge WebView2", "Microsoft Corporation"),
-            Snap(111, 100, "msedgewebview2.exe", $@"{helperDir}\msedgewebview2.exe", BaseTime.AddSeconds(2),
-                "Microsoft Edge WebView2", "Microsoft Corporation"),
-            Snap(112, 100, "msedgewebview2.exe", $@"{helperDir}\msedgewebview2.exe", BaseTime.AddSeconds(3),
-                "Microsoft Edge WebView2", "Microsoft Corporation"));
+            Snap(100, null, "SearchHost.exe", @"C:\Program Files\WindowsSearch\SearchHost.exe", BaseTime,
+                "Windows Search", "Microsoft Corporation"),
+            Snap(110, 100, "searchhelper.exe", $@"{helperDir}\searchhelper.exe", BaseTime.AddSeconds(1),
+                "Windows Search", "Microsoft Corporation"),
+            Snap(111, 100, "searchhelper.exe", $@"{helperDir}\searchhelper.exe", BaseTime.AddSeconds(2),
+                "Windows Search", "Microsoft Corporation"),
+            Snap(112, 100, "searchindexer.exe", $@"{helperDir}\searchindexer.exe", BaseTime.AddSeconds(3),
+                "Windows Search", "Microsoft Corporation"));
 
         ApplicationGroup group = Assert.Single(groups);
         Assert.Equal(4, group.ProcessCount);
 
-        // DisplayName 链：Root ProductName（泛化无效）→ Root FileDescription（无）→ Root 进程名
-        Assert.Equal("SearchHost", group.Identity.DisplayName);
-        Assert.False(group.Identity.DisplayName.Contains("WebView", StringComparison.OrdinalIgnoreCase));
+        // DisplayName 来自 Root，不受 helper 影响
+        Assert.Equal("Windows Search", group.Identity.DisplayName);
+        // 安装目录来自 Root/MainExecutable，不被 helper 目录多数票覆盖
+        Assert.Equal(@"C:\Program Files\WindowsSearch", group.Identity.InstallDirectory);
     }
 
     [Fact]

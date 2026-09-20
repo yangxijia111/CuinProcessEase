@@ -84,11 +84,12 @@ public static class ApplicationGroupingEngine
     /// <summary>
     /// 规则 A/B：进程树父子边。真实父子关系不能等价为同一软件，
     /// 任何树边（含 Verified）都必须有附加证据才允许合并：
-    /// - 附加证据 = SameExecutable / SameInstallDirectory / SameProduct+SameCompany，
-    ///   或 Verified 边 + 相同有效 CompanyName（允许 Medium）；
-    /// - Verified 边 + 强证据（同 exe / 同目录 / 同产品）→ High；
+    /// - 附加证据 = SameExecutable / SameInstallDirectory / SameProduct+SameCompany；
+    /// - Verified 边 + 强证据（同 exe / 同目录 / 同产品公司）→ High；
     /// - Unverified 边 + 证据，或含歧义进程名（runtime/宿主/WebView2 等）→ 恒 Medium；
-    /// - 无任何证据 → 不生成关系（宁拆不合）。
+    /// - 无任何证据（包括仅公司相同）→ 不生成关系（宁拆不合）。
+    ///   CompanyName 单独永远不能触发合并，即使父子关系已 Verified；
+    ///   公司名只作为已有强证据的补充 Reasons 与显示解释信息。
     /// </summary>
     private static void GenerateTreeEdgeRelation(
         ProcessNode child,
@@ -105,49 +106,25 @@ public static class ApplicationGroupingEngine
 
         GroupingReason evidenceReasons = GetCommonEvidence(parentProcess, childProcess);
 
-        // 公司名单独相同：仅当边为 Verified 时作为最弱附加证据（Medium）；
-        // Unverified 边 + 仅公司相同不足以合并（同公司可能运行大量不同软件）
-        bool companyOnlyEvidence = false;
-        if (evidenceReasons == GroupingReason.None
-            && verifiedEdge
-            && !string.IsNullOrWhiteSpace(parentProcess.CompanyName)
-            && string.Equals(parentProcess.CompanyName, childProcess.CompanyName, StringComparison.OrdinalIgnoreCase))
+        if (evidenceReasons == GroupingReason.None)
         {
-            companyOnlyEvidence = true;
-        }
-
-        if (evidenceReasons == GroupingReason.None && !companyOnlyEvidence)
-        {
-            return; // 证据不足，宁可拆开（如 IDE.exe → chrome.exe 即使 Verified 也不合并）
+            return; // 证据不足（含仅公司相同的情形），宁可拆开
         }
 
         GroupingReason edgeReason = verifiedEdge
             ? GroupingReason.VerifiedParentChild
             : GroupingReason.UnverifiedParentChild;
 
-        GroupingConfidence confidence;
-        if (companyOnlyEvidence)
-        {
-            confidence = GroupingConfidence.Medium;
-        }
-        else if (verifiedEdge && !ambiguous)
-        {
-            // Verified 父子 + 强证据（同 exe / 同目录 / 同产品公司）
-            confidence = GroupingConfidence.High;
-        }
-        else
-        {
-            // Unverified 边 + 证据，或歧义进程（runtime / 宿主 / 共享组件）：恒 Medium
-            confidence = GroupingConfidence.Medium;
-        }
-
-        GroupingReason evidencePart = companyOnlyEvidence ? GroupingReason.SameCompany : evidenceReasons;
+        // Verified 边 + 强证据（非歧义名）→ High；其余（Unverified 或歧义名）恒 Medium
+        GroupingConfidence confidence = verifiedEdge && !ambiguous
+            ? GroupingConfidence.High
+            : GroupingConfidence.Medium;
 
         relations.Add(new Relation(
             nodeIndexByPid[parent.ProcessId],
             nodeIndexByPid[child.ProcessId],
             confidence,
-            edgeReason | evidencePart));
+            edgeReason | evidenceReasons));
     }
 
     /// <summary>
