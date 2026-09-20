@@ -21,6 +21,8 @@ namespace CuinProcessEase.Windows.Safety;
 /// 8. 其余 → Normal / Allowed。
 /// 查询失败（isCritical / protectionLevel 为 null）绝不当作 false / NONE：
 /// 若同时身份不足则落入 Unknown，绝不落入 Normal。
+/// accessDenied（任一 Safety API 明确返回 ERROR_ACCESS_DENIED）只叠加
+/// SafetyReason.AccessDenied 证据，绝不改变判定本身；其余失败原因保持未知。
 /// </remarks>
 internal static class SafetyDecisionEngine
 {
@@ -36,6 +38,33 @@ internal static class SafetyDecisionEngine
     private const string SystemAccountPrefix = @"NT AUTHORITY\";
 
     public static ProcessSafetyResult Evaluate(
+        ProcessSnapshot process,
+        bool isSelf,
+        bool? isCritical,
+        PROTECTION_LEVEL? protectionLevel,
+        bool accessDenied = false)
+    {
+        ProcessSafetyResult result = EvaluateCore(process, isSelf, isCritical, protectionLevel);
+
+        if (!accessDenied)
+        {
+            return result;
+        }
+
+        // 明确的拒绝访问证据：仅叠加依据，绝不改变判定（不知道 ≠ 安全，也不因此更危险）
+        return new ProcessSafetyResult
+        {
+            Identity = result.Identity,
+            ProcessName = result.ProcessName,
+            RiskLevel = result.RiskLevel,
+            Decision = result.Decision,
+            Reasons = result.Reasons | SafetyReason.AccessDenied,
+            IsCritical = result.IsCritical,
+            ProtectionLevel = result.ProtectionLevel,
+        };
+    }
+
+    private static ProcessSafetyResult EvaluateCore(
         ProcessSnapshot process,
         bool isSelf,
         bool? isCritical,

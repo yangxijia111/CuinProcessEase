@@ -1,3 +1,4 @@
+using System.Runtime.InteropServices;
 using CuinProcessEase.Core.Grouping;
 using CuinProcessEase.Core.Models;
 using CuinProcessEase.Core.Safety;
@@ -26,6 +27,7 @@ public sealed class ProcessSafetyService : IProcessSafetyService
 
         bool? isCritical;
         PROTECTION_LEVEL? protectionLevel;
+        bool accessDenied;
 
         IntPtr handle = NativeMethods.OpenProcess(
             NativeMethods.PROCESS_QUERY_LIMITED_INFORMATION, bInheritHandle: false, (uint)process.ProcessId);
@@ -34,8 +36,9 @@ public sealed class ProcessSafetyService : IProcessSafetyService
         {
             try
             {
-                isCritical = QueryIsProcessCritical(handle);
-                protectionLevel = QueryProtectionLevel(handle);
+                isCritical = QueryIsProcessCritical(handle, out bool criticalDenied);
+                protectionLevel = QueryProtectionLevel(handle, out bool levelDenied);
+                accessDenied = criticalDenied || levelDenied;
             }
             finally
             {
@@ -44,12 +47,14 @@ public sealed class ProcessSafetyService : IProcessSafetyService
         }
         else
         {
-            // 句柄打不开：两项保护状态均未知（不伪造）
+            // 句柄打不开：两项保护状态均未知（不伪造）；
+            // 若失败原因是拒绝访问，则作为明确证据记录，其余原因保持未知
             isCritical = null;
             protectionLevel = null;
+            accessDenied = Marshal.GetLastWin32Error() == NativeMethods.ERROR_ACCESS_DENIED;
         }
 
-        return SafetyDecisionEngine.Evaluate(process, isSelf, isCritical, protectionLevel);
+        return SafetyDecisionEngine.Evaluate(process, isSelf, isCritical, protectionLevel, accessDenied);
     }
 
     /// <inheritdoc />
@@ -65,10 +70,12 @@ public sealed class ProcessSafetyService : IProcessSafetyService
     }
 
     /// <summary>
-    /// IsProcessCritical 查询：返回 false 且 GetLastError 非 0 时视为未知。
+    /// IsProcessCritical 查询：返回 false 且 GetLastError 非 0 时视为未知；
+    /// 失败原因是拒绝访问时通过 <paramref name="accessDenied"/> 上报。
     /// </summary>
-    private static bool? QueryIsProcessCritical(IntPtr processHandle)
+    private static bool? QueryIsProcessCritical(IntPtr processHandle, out bool accessDenied)
     {
+        accessDenied = false;
         try
         {
             if (NativeMethods.IsProcessCritical(processHandle, out bool isCritical))
@@ -76,7 +83,8 @@ public sealed class ProcessSafetyService : IProcessSafetyService
                 return isCritical;
             }
 
-            // 失败 ≠ false：返回未知
+            // 失败 ≠ false：返回未知；拒绝访问是明确证据，其余原因保持未知
+            accessDenied = Marshal.GetLastWin32Error() == NativeMethods.ERROR_ACCESS_DENIED;
             return null;
         }
         catch
@@ -87,10 +95,12 @@ public sealed class ProcessSafetyService : IProcessSafetyService
 
     /// <summary>
     /// ProtectionLevel 查询：成功返回原始 PROTECTION_LEVEL（无保护为 NONE=0xFFFFFFFE，
-    /// 而非 0——0 是有效级别 WinTcb-Light）；失败返回未知（null，绝不当 NONE）。
+    /// 而非 0——0 是有效级别 WinTcb-Light）；失败返回未知（null，绝不当 NONE）；
+    /// 失败原因是拒绝访问时通过 <paramref name="accessDenied"/> 上报。
     /// </summary>
-    private static PROTECTION_LEVEL? QueryProtectionLevel(IntPtr processHandle)
+    private static PROTECTION_LEVEL? QueryProtectionLevel(IntPtr processHandle, out bool accessDenied)
     {
+        accessDenied = false;
         try
         {
             var info = new NativeMethods.PROCESS_PROTECTION_LEVEL_INFORMATION();
@@ -98,11 +108,12 @@ public sealed class ProcessSafetyService : IProcessSafetyService
                     processHandle,
                     PROCESS_INFORMATION_CLASS.ProcessProtectionLevelInfo,
                     ref info,
-                    System.Runtime.InteropServices.Marshal.SizeOf<NativeMethods.PROCESS_PROTECTION_LEVEL_INFORMATION>()))
+                    Marshal.SizeOf<NativeMethods.PROCESS_PROTECTION_LEVEL_INFORMATION>()))
             {
                 return unchecked((PROTECTION_LEVEL)info.ProtectionLevel);
             }
 
+            accessDenied = Marshal.GetLastWin32Error() == NativeMethods.ERROR_ACCESS_DENIED;
             return null;
         }
         catch

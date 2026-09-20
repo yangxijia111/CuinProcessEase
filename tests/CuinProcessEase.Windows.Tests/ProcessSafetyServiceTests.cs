@@ -135,6 +135,43 @@ public sealed class ProcessSafetyServiceTests
     }
 
     [Fact]
+    public void 决策引擎_查询被明确拒绝_AccessDenied写入依据但不改变判定()
+    {
+        // 明确的 ERROR_ACCESS_DENIED：叠加 AccessDenied 依据；
+        // 身份信息充足时仍按正常管线走 Normal/Allowed，绝不变 Protected/Unknown
+        ProcessSafetyResult result = SafetyDecisionEngine.Evaluate(
+            Snap(100, "normal.exe"), isSelf: false, isCritical: null,
+            protectionLevel: null, accessDenied: true);
+
+        Assert.Equal(RiskLevel.Normal, result.RiskLevel);
+        Assert.Equal(SafetyDecision.Allowed, result.Decision);
+        Assert.True(result.Reasons.HasFlag(SafetyReason.AccessDenied));
+    }
+
+    [Fact]
+    public void 决策引擎_AccessDenied与Blocked并存_两类依据都保留()
+    {
+        ProcessSafetyResult result = SafetyDecisionEngine.Evaluate(
+            Snap(100, "critical.exe"), isSelf: false, isCritical: true,
+            protectionLevel: null, accessDenied: true);
+
+        Assert.Equal(SafetyDecision.Blocked, result.Decision);
+        Assert.True(result.Reasons.HasFlag(SafetyReason.CriticalWindowsProcess));
+        Assert.True(result.Reasons.HasFlag(SafetyReason.AccessDenied));
+    }
+
+    [Fact]
+    public void 决策引擎_查询失败但非拒绝_不带AccessDenied依据()
+    {
+        ProcessSafetyResult result = SafetyDecisionEngine.Evaluate(
+            Snap(100, "normal.exe"), isSelf: false, isCritical: null,
+            protectionLevel: null, accessDenied: false);
+
+        Assert.False(result.Reasons.HasFlag(SafetyReason.AccessDenied));
+        Assert.True(result.Reasons.HasFlag(SafetyReason.UnknownSafetyState) is false);
+    }
+
+    [Fact]
     public void 决策引擎_管理员普通应用_Elevated_RequiresElevation而非Blocked()
     {
         ProcessSafetyResult result = SafetyDecisionEngine.Evaluate(
@@ -197,6 +234,22 @@ public sealed class ProcessSafetyServiceTests
 
         Assert.Equal(SafetyDecision.Blocked, result.Decision);
         Assert.True(result.Reasons.HasFlag(SafetyReason.SelfProcess));
+    }
+
+    [Fact]
+    public async Task 自身进程_真实ProtectionLevel查询_必须返回NONE且不为null()
+    {
+        // 回归保护：GetProcessInformation(ProcessProtectionLevelInfo) 一旦悄悄失效
+        // （如信息类编号被改错），本测试立即失败，绝不允许静默退化为 null
+        var snapshot = await new Services.ProcessSnapshotService().CaptureAsync();
+        ProcessSnapshot self = snapshot.Processes.Single(p => p.ProcessId == Environment.ProcessId);
+
+        ProcessSafetyResult result = Service.Assess(self);
+
+        Assert.Equal(SafetyDecision.Blocked, result.Decision); // Self=Blocked
+        Assert.NotNull(result.ProtectionLevel);
+        Assert.Equal((uint)PROTECTION_LEVEL.PROTECTION_LEVEL_NONE, result.ProtectionLevel.Value);
+        Assert.False(result.Reasons.HasFlag(SafetyReason.AccessDenied));
     }
 
     [Fact]

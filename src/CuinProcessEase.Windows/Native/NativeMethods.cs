@@ -12,6 +12,9 @@ internal static partial class NativeMethods
 
     public static readonly IntPtr INVALID_HANDLE_VALUE = new(-1);
 
+    /// <summary>拒绝访问：Safety API 查询被权限拒绝时作为明确证据记录。</summary>
+    public const int ERROR_ACCESS_DENIED = 5;
+
     public const uint ERROR_NO_MORE_FILES = 18;
 
     /// <summary>缓冲区不足，用于路径读取的动态扩容重试。</summary>
