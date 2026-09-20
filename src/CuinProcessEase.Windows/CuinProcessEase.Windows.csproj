@@ -11,4 +11,9 @@
     <ProjectReference Include="..\CuinProcessEase.Core\CuinProcessEase.Core.csproj" />
   </ItemGroup>
 
+  <ItemGroup>
+    <!-- 允许测试项目直接验证 internal 的 GetProcessTimes 备用路径 -->
+    <InternalsVisibleTo Include="CuinProcessEase.Windows.Tests" />
+  </ItemGroup>
+
 </Project>

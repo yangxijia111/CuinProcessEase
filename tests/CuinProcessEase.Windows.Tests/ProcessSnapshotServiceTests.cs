@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Runtime.InteropServices;
 using CuinProcessEase.Core.Models;
 using CuinProcessEase.Windows.Services;
 using Xunit;
@@ -11,6 +12,14 @@ namespace CuinProcessEase.Windows.Tests;
 public sealed class ProcessSnapshotServiceTests
 {
     private const string CmdPath = @"C:\Windows\System32\cmd.exe";
+
+    private const uint PROCESS_QUERY_LIMITED_INFORMATION = 0x1000;
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern IntPtr OpenProcess(uint desiredAccess, bool inheritHandle, uint processId);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool CloseHandle(IntPtr handle);
 
     private static Task<ProcessSnapshotCollection> CaptureAsync()
         => new ProcessSnapshotService().CaptureAsync();
@@ -173,6 +182,55 @@ public sealed class ProcessSnapshotServiceTests
                 Assert.True(p.WorkingSetBytes.Value >= 0);
             }
             Assert.True(Enum.IsDefined(p.Architecture));
+        });
+    }
+
+    [Fact]
+    public void GetProcessTimes备用路径_返回与NET一致的创建时间()
+    {
+        // 直接验证 StartTime 第二获取路径：用低权限句柄调用 internal 的
+        // ReadCreationTimeUtc（GetProcessTimes），结果应与 .NET Process.StartTime 一致
+        IntPtr handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, (uint)Environment.ProcessId);
+        Assert.NotEqual(IntPtr.Zero, handle);
+
+        try
+        {
+            DateTime? creationTimeUtc = ProcessSnapshotService.ReadCreationTimeUtc(handle);
+
+            Assert.NotNull(creationTimeUtc);
+
+            DateTime netStartTimeUtc = Process.GetCurrentProcess().StartTime.ToUniversalTime();
+            Assert.True(
+                Math.Abs((creationTimeUtc.Value - netStartTimeUtc).TotalSeconds) < 2,
+                $"GetProcessTimes={creationTimeUtc:O} 与 .NET StartTime={netStartTimeUtc:O} 不一致");
+        }
+        finally
+        {
+            CloseHandle(handle);
+        }
+    }
+
+    [Fact]
+    public void GetProcessTimes备用路径_无效句柄返回null不抛异常()
+    {
+        // 非法句柄（0）必须安全返回 null，不得抛出异常影响扫描
+        Assert.Null(ProcessSnapshotService.ReadCreationTimeUtc(IntPtr.Zero));
+    }
+
+    [Fact]
+    public async Task 并发调用CaptureAsync_全部成功且结果一致()
+    {
+        // 同时发起 3 路捕获（模拟自动刷新重叠触发的服务端场景），
+        // 每一路都应独立成功完成
+        Task<ProcessSnapshotCollection>[] captures =
+            [CaptureAsync(), CaptureAsync(), CaptureAsync()];
+
+        ProcessSnapshotCollection[] results = await Task.WhenAll(captures);
+
+        Assert.All(results, r =>
+        {
+            Assert.NotEmpty(r.Processes);
+            Assert.Contains(r.Processes, p => p.ProcessId == Environment.ProcessId);
         });
     }
 }

@@ -14,6 +14,9 @@ internal static partial class NativeMethods
 
     public const uint ERROR_NO_MORE_FILES = 18;
 
+    /// <summary>缓冲区不足，用于路径读取的动态扩容重试。</summary>
+    public const int ERROR_INSUFFICIENT_BUFFER = 122;
+
     // ---------- Tool Help API（父进程 PID 来源） ----------
 
     /// <summary>快照包含系统全部进程。</summary>
@@ -67,6 +70,18 @@ internal static partial class NativeMethods
     [DllImport("kernel32.dll", SetLastError = true)]
     public static extern bool IsWow64Process(IntPtr hProcess, out bool wow64Process);
 
+    /// <summary>
+    /// 读取进程时间；PROCESS_QUERY_LIMITED_INFORMATION 权限句柄即可调用，
+    /// lpCreationTime 即进程创建时间（UTC FILETIME），作为 StartTime 的第二获取路径。
+    /// </summary>
+    [DllImport("kernel32.dll", SetLastError = true)]
+    public static extern bool GetProcessTimes(
+        IntPtr hProcess,
+        out System.Runtime.InteropServices.ComTypes.FILETIME lpCreationTime,
+        out System.Runtime.InteropServices.ComTypes.FILETIME lpExitTime,
+        out System.Runtime.InteropServices.ComTypes.FILETIME lpKernelTime,
+        out System.Runtime.InteropServices.ComTypes.FILETIME lpUserTime);
+
     // ---------- 进程架构（IsWow64Process2，Windows 10 1511+） ----------
 
     /// <summary>IMAGE_FILE_MACHINE_UNKNOWN：进程原生执行（非 WoW64 / 非仿真），架构即本机架构。</summary>
@@ -95,8 +110,8 @@ internal static partial class NativeMethods
 
     public const uint TOKEN_QUERY = 0x0008;
 
-    /// <summary>GetTokenInformation 的 TOKEN_OWNER 类别，用于取所有者 SID。</summary>
-    public const int TokenOwner = 1;
+    /// <summary>GetTokenInformation 的 TOKEN_USER 类别，用于取进程用户 SID。</summary>
+    public const int TokenUser = 1;
 
     /// <summary>GetTokenInformation 的 TOKEN_ELEVATION 类别，用于判断管理员权限。</summary>
     public const int TokenElevation = 20;

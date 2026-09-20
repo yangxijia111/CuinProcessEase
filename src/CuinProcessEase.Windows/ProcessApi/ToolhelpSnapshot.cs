@@ -44,20 +44,39 @@ internal static class ToolhelpSnapshot
 
             if (!NativeMethods.Process32FirstW(snapshot, ref entry))
             {
-                // 空快照（理论上是系统里至少有 Idle），按无进程处理
-                return result;
+                int error = Marshal.GetLastWin32Error();
+                if (error == unchecked((int)NativeMethods.ERROR_NO_MORE_FILES))
+                {
+                    // 空快照：没有任何进程可枚举，属正常结束
+                    return result;
+                }
+
+                throw new Win32Exception(error, $"Process32FirstW 失败，Win32 错误码 {error}");
             }
 
-            do
+            while (true)
             {
                 int pid = unchecked((int)entry.th32ProcessID);
                 result[pid] = new ToolhelpProcessEntry(
                     pid,
                     unchecked((int)entry.th32ParentProcessID),
                     entry.szExeFile);
+
+                if (NativeMethods.Process32NextW(snapshot, ref entry))
+                {
+                    continue;
+                }
+
+                int error = Marshal.GetLastWin32Error();
+                if (error == unchecked((int)NativeMethods.ERROR_NO_MORE_FILES))
+                {
+                    // 枚举完成
+                    break;
+                }
+
+                // 其他错误：抛出，由 SnapshotService 的降级逻辑统一处理
+                throw new Win32Exception(error, $"Process32NextW 失败，Win32 错误码 {error}");
             }
-            while (NativeMethods.Process32NextW(snapshot, ref entry));
-            // Process32NextW 返回 false 表示枚举完毕（或读取出错），两种情况都停止即可
         }
         finally
         {

@@ -3,8 +3,8 @@
   <PropertyGroup>
     <TargetFramework>net10.0-windows</TargetFramework>
     <IsPackable>false</IsPackable>
-    <AssemblyName>CuinProcessEase.Core.Tests</AssemblyName>
-    <RootNamespace>CuinProcessEase.Core.Tests</RootNamespace>
+    <AssemblyName>CuinProcessEase.Windows.Tests</AssemblyName>
+    <RootNamespace>CuinProcessEase.Windows.Tests</RootNamespace>
   </PropertyGroup>
 
   <ItemGroup>

@@ -17,7 +17,7 @@ namespace CuinProcessEase.Windows.Services;
 /// - 进程枚举 / 名称 / StartTime / SessionId / 内存：System.Diagnostics.Process；
 /// - 父进程 PID（PPID）：Win32 Tool Help API（CreateToolhelp32Snapshot / Process32First / Process32Next）；
 /// - 可执行路径：QueryFullProcessImageNameW（仅要求 PROCESS_QUERY_LIMITED_INFORMATION，成功率高于 MainModule）；
-/// - 用户名 / 提升状态：进程令牌 TokenOwner / TokenElevation；
+/// - 用户名 / 提升状态：进程令牌 TokenUser / TokenElevation；
 /// - 架构：IsWow64Process2（准确区分 X86 / X64 / ARM64 及 ARM64 仿真进程），不可用时降级 IsWow64Process。
 /// 容错原则：任何单进程、单字段读取失败只置 null / Unknown，绝不使整次扫描失败。
 /// </remarks>
@@ -110,7 +110,8 @@ public sealed class ProcessSnapshotService : IProcessSnapshotService
             }
         }
 
-        // StartTime 读取失败（AccessDenied / 进程已退出）时为 null
+        // StartTime 第一路径：System.Diagnostics.Process；失败（AccessDenied / 进程已退出）先保持 null，
+        // 在拿到低权限句柄后由 GetProcessTimes 第二路径补读（见下）
         DateTime? startTimeUtc = TryRead(() => process.StartTime)?.ToUniversalTime();
 
         int? sessionId = TryRead(() => process.SessionId);
@@ -131,6 +132,13 @@ public sealed class ProcessSnapshotService : IProcessSnapshotService
             try
             {
                 executablePath = ReadFullImageName(processHandle);
+
+                // StartTime 第二路径：在已有低权限句柄上用 GetProcessTimes 读创建时间。
+                // 仅在第一路径失败且该路径成功时采用，绝不伪造时间
+                if (startTimeUtc is null)
+                {
+                    startTimeUtc = ReadCreationTimeUtc(processHandle);
+                }
 
                 architecture = ReadArchitecture(processHandle);
 
@@ -203,11 +211,25 @@ public sealed class ProcessSnapshotService : IProcessSnapshotService
     {
         try
         {
-            var buffer = new StringBuilder(1024);
-            uint size = (uint)buffer.Capacity;
-            if (NativeMethods.QueryFullProcessImageNameW(processHandle, 0, buffer, ref size))
+            // 从 1K 字符起步，遇 ERROR_INSUFFICIENT_BUFFER 倍增扩容，
+            // 上限覆盖 Windows 长路径（32767 字符），不引入额外依赖
+            int capacity = 1024;
+            while (capacity <= 65536)
             {
-                return buffer.ToString();
+                var buffer = new StringBuilder(capacity);
+                uint size = (uint)capacity;
+                if (NativeMethods.QueryFullProcessImageNameW(processHandle, 0, buffer, ref size))
+                {
+                    return buffer.ToString();
+                }
+
+                if (Marshal.GetLastWin32Error() != NativeMethods.ERROR_INSUFFICIENT_BUFFER)
+                {
+                    // 权限不足等其他错误，按 null 处理，不再扩容
+                    return null;
+                }
+
+                capacity *= 2;
             }
         }
         catch
@@ -216,6 +238,40 @@ public sealed class ProcessSnapshotService : IProcessSnapshotService
         }
 
         return null;
+    }
+
+    /// <summary>
+    /// 通过 GetProcessTimes 读取进程创建时间（UTC），作为 StartTime 的第二获取路径。
+    /// </summary>
+    /// <remarks>
+    /// internal 以便测试直接验证；任何失败或非法值（FILETIME 为 0）都返回 null，不伪造时间。
+    /// </remarks>
+    internal static DateTime? ReadCreationTimeUtc(IntPtr processHandle)
+    {
+        try
+        {
+            if (!NativeMethods.GetProcessTimes(
+                    processHandle,
+                    out System.Runtime.InteropServices.ComTypes.FILETIME creation,
+                    out _, out _, out _))
+            {
+                return null;
+            }
+
+            long raw = ((long)creation.dwHighDateTime << 32) | (uint)creation.dwLowDateTime;
+            if (raw == 0)
+            {
+                // 无效创建时间，宁缺毋假
+                return null;
+            }
+
+            // GetProcessTimes 返回的创建时间本身就是 UTC FILETIME
+            return DateTime.FromFileTimeUtc(raw);
+        }
+        catch
+        {
+            return null;
+        }
     }
 
     private static ProcessArchitecture ReadArchitecture(IntPtr processHandle)
@@ -325,7 +381,7 @@ public sealed class ProcessSnapshotService : IProcessSnapshotService
 
         try
         {
-            userName = ReadTokenOwnerName(tokenHandle);
+            userName = ReadTokenUserName(tokenHandle);
             isElevated = ReadTokenElevation(tokenHandle);
         }
         finally
@@ -334,12 +390,13 @@ public sealed class ProcessSnapshotService : IProcessSnapshotService
         }
     }
 
-    private static string? ReadTokenOwnerName(IntPtr tokenHandle)
+    /// <summary>读取令牌的用户账户（TOKEN_USER → SID → 账户名）。</summary>
+    private static string? ReadTokenUserName(IntPtr tokenHandle)
     {
         try
         {
-            // 第一次调用获取所需缓冲区长度（TOKEN_OWNER = 一个指针 + SID）
-            NativeMethods.GetTokenInformation(tokenHandle, NativeMethods.TokenOwner, IntPtr.Zero, 0, out uint length);
+            // 第一次调用获取所需缓冲区长度（TOKEN_USER = 一个 SID 指针 + SID）
+            NativeMethods.GetTokenInformation(tokenHandle, NativeMethods.TokenUser, IntPtr.Zero, 0, out uint length);
             if (length == 0 || length > 64 * 1024)
             {
                 return null;
@@ -348,12 +405,12 @@ public sealed class ProcessSnapshotService : IProcessSnapshotService
             IntPtr buffer = Marshal.AllocHGlobal((int)length);
             try
             {
-                if (!NativeMethods.GetTokenInformation(tokenHandle, NativeMethods.TokenOwner, buffer, length, out _))
+                if (!NativeMethods.GetTokenInformation(tokenHandle, NativeMethods.TokenUser, buffer, length, out _))
                 {
                     return null;
                 }
 
-                // TOKEN_OWNER 结构第一个成员就是所有者 SID 指针
+                // TOKEN_USER 结构第一个成员就是用户 SID 指针
                 IntPtr sid = Marshal.ReadIntPtr(buffer);
                 if (sid == IntPtr.Zero)
                 {

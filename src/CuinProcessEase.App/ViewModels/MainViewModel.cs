@@ -16,6 +16,10 @@ public sealed class MainViewModel : ObservableObject, IDisposable
 {
     private readonly IProcessSnapshotService _snapshotService = new ProcessSnapshotService();
     private readonly DispatcherTimer _refreshTimer;
+
+    /// <summary>扫描互斥门：同一时刻最多一次 Capture，拿不到门直接跳过本次刷新（不排队积压）。</summary>
+    private readonly SemaphoreSlim _captureGate = new(1, 1);
+
     private string _statusText = "就绪";
 
     public MainViewModel()
@@ -67,6 +71,13 @@ public sealed class MainViewModel : ObservableObject, IDisposable
 
     private async Task CaptureAsync()
     {
+        // in-flight guard：上一次扫描未完成（慢扫描 > 刷新间隔）时直接放弃本次触发，
+        // 请求不排队，避免自动刷新叠加出多个并发 Capture
+        if (!await _captureGate.WaitAsync(0))
+        {
+            return;
+        }
+
         var stopwatch = Stopwatch.StartNew();
 
         try
@@ -89,11 +100,16 @@ public sealed class MainViewModel : ObservableObject, IDisposable
             // 扫描整体失败（极罕见的系统级错误）只更新状态栏，不让 UI 崩溃
             StatusText = $"扫描失败：{ex.Message}";
         }
+        finally
+        {
+            _captureGate.Release();
+        }
     }
 
     public void Dispose()
     {
         _refreshTimer.Stop();
+        _captureGate.Dispose();
     }
 }
 
