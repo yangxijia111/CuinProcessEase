@@ -10,6 +10,8 @@ namespace CuinProcessEase.Core.Safety;
 /// 以 PID+StartTime 识别"还是不是同一个进程"：同一身份直接复用结果，
 /// 新身份才重新调用 Safety API，避免每秒对全部 500+ 进程重复昂贵查询。
 /// PID 被复用（StartTime 变化）即为新身份，绝不误用旧结果。
+/// <see cref="ProcessIdentity.StartTimeUtc"/> 为 null 的身份不可靠
+/// （PID+null 无法防止 PID 重用）：直接绕过缓存，每次重新评估，绝不长期缓存。
 /// 非线程安全：由单一刷新循环顺序使用。
 /// 未来真正执行 Kill 前仍必须绕过缓存重新验证。
 /// </remarks>
@@ -20,16 +22,33 @@ public sealed class SafetyResultCache
     /// <summary>当前缓存条目数。</summary>
     public int Count => _cache.Count;
 
-    /// <summary>是否命中缓存。</summary>
+    /// <summary>是否命中缓存。StartTime 未知的身份视为永不命中。</summary>
     public bool TryGet(ProcessIdentity identity, out ProcessSafetyResult result)
-        => _cache.TryGetValue(identity, out result!);
+    {
+        if (identity.StartTimeUtc is null)
+        {
+            result = null!;
+            return false;
+        }
 
-    /// <summary>取缓存的评估结果；新身份才调用 <paramref name="assess"/> 并缓存。</summary>
+        return _cache.TryGetValue(identity, out result!);
+    }
+
+    /// <summary>
+    /// 取缓存的评估结果；新身份才调用 <paramref name="assess"/> 并缓存。
+    /// StartTime 未知的身份（PID+null 不是可靠跨刷新身份）直接评估、绝不缓存。
+    /// </summary>
     public ProcessSafetyResult GetOrAdd(
         ProcessIdentity identity,
         Func<ProcessIdentity, ProcessSafetyResult> assess)
     {
         ArgumentNullException.ThrowIfNull(assess);
+
+        if (identity.StartTimeUtc is null)
+        {
+            // 不构造假 StartTime：每次真实评估，绝不把复用 PID 当旧进程
+            return assess(identity);
+        }
 
         if (_cache.TryGetValue(identity, out ProcessSafetyResult? cached))
         {

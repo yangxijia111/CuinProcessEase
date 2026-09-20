@@ -120,4 +120,53 @@ public sealed class ResourceSamplingTests
 
         Assert.Equal(0, cached.Cache.Count);
     }
+
+    // ================= CPU 采样身份：PID + CreationTime（P5.1） =================
+
+    [Fact]
+    public void CPU采样_同一进程两次采样_CreationTime相同_输出百分比()
+    {
+        double? cpu = ProcessResourceSampler.ComputeCpuDeltaOrNull(
+            previousCreationTime: 133_000_000_000_000_000,
+            currentCreationTime: 133_000_000_000_000_000,
+            previousTotalTicks: 1_000_000,
+            currentTotalTicks: 2_000_000,
+            previousWallTicks: 0,
+            currentWallTicks: 10_000_000,
+            coreCount: 4);
+
+        Assert.NotNull(cpu);
+        Assert.Equal(2.5, cpu);
+    }
+
+    [Fact]
+    public void CPU采样_PID相同但CreationTime不同_视为新进程_CPU为null()
+    {
+        // PID 重用场景：绝不把复用 PID 的旧历史用在新进程上
+        double? cpu = ProcessResourceSampler.ComputeCpuDeltaOrNull(
+            previousCreationTime: 133_000_000_000_000_000,
+            currentCreationTime: 133_500_000_000_000_000,
+            previousTotalTicks: 1_000_000,
+            currentTotalTicks: 2_000_000,
+            previousWallTicks: 0,
+            currentWallTicks: 10_000_000,
+            coreCount: 4);
+
+        Assert.Null(cpu);
+    }
+
+    [Fact]
+    public void CPU采样_CreationTime不同时_即使墙钟非法也返回null而非异常()
+    {
+        double? cpu = ProcessResourceSampler.ComputeCpuDeltaOrNull(
+            previousCreationTime: 100,
+            currentCreationTime: 200,
+            previousTotalTicks: 0,
+            currentTotalTicks: 0,
+            previousWallTicks: 0,
+            currentWallTicks: 0,
+            coreCount: 0);
+
+        Assert.Null(cpu);
+    }
 }

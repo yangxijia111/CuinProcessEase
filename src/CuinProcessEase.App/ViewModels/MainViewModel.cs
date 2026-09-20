@@ -271,7 +271,15 @@ public sealed class MainViewModel : ObservableObject, IDisposable
         foreach (ApplicationGroup group in groups)
         {
             ApplicationSafetyResult groupSafety = _safetyService.Assess(group);
-            safetyByGroup[ApplicationStableKey.Compute(group)] = groupSafety;
+            string key = ApplicationStableKey.Compute(group);
+            if (!safetyByGroup.TryAdd(key, groupSafety))
+            {
+                // 身份系统故障：同帧重复 StableKey，绝不静默覆盖（正常 StableKey 规则下不会发生）
+                throw new InvalidOperationException(
+                    $"StableKey 冲突：'{key}' 同时属于 '{safetyByGroup[key].DisplayName}' 与 " +
+                    $"'{groupSafety.DisplayName}'。");
+            }
+
             foreach (ProcessSafetyResult member in groupSafety.MemberResults)
             {
                 safetyByPid[member.Identity.ProcessId] = member;
@@ -309,7 +317,11 @@ public sealed class MainViewModel : ObservableObject, IDisposable
                 safetyByGroup[key],
                 _commandLineProvider.Capture,
                 _iconCache);
-            _rowsByKey[key] = row;
+            if (!_rowsByKey.TryAdd(key, row))
+            {
+                // Diff 已保证 Added 的 Key 唯一；此防护保证未来回归立刻显式失败
+                throw new InvalidOperationException($"StableKey 冲突：'{key}' 试图重复添加行。");
+            }
         }
 
         foreach (ApplicationGroup updated in diff.Updated)

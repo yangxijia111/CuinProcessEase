@@ -87,4 +87,62 @@ public sealed class SafetyResultCacheTests
 
         Assert.Equal(0, cache.Count);
     }
+
+    // ================= StartTime = null（P5.1 身份加固） =================
+
+    [Fact]
+    public void 缓存_StartTime为null_每次都重新评估_绝不当作可靠身份复用()
+    {
+        // PID + null 无法防止 PID 重用：直接绕过缓存，绝不长期缓存
+        var cache = new SafetyResultCache();
+        var unreliable = new ProcessIdentity(100, null);
+        int factoryCalls = 0;
+
+        cache.GetOrAdd(unreliable, _ => { factoryCalls++; return Result(100); });
+        cache.GetOrAdd(unreliable, _ => { factoryCalls++; return Result(100); });
+        cache.GetOrAdd(unreliable, _ => { factoryCalls++; return Result(100); });
+
+        Assert.Equal(3, factoryCalls);
+        Assert.Equal(0, cache.Count); // 绝不进入缓存
+    }
+
+    [Fact]
+    public void 缓存_StartTime为null_TryGet永不命中()
+    {
+        var cache = new SafetyResultCache();
+
+        Assert.False(cache.TryGet(new ProcessIdentity(100, null), out ProcessSafetyResult? result));
+        Assert.Null(result);
+    }
+
+    [Fact]
+    public void 缓存_StartTime为null与有时间的同PID_互不干扰()
+    {
+        var cache = new SafetyResultCache();
+        var withTime = new ProcessIdentity(100, BaseTime);
+        var withoutTime = new ProcessIdentity(100, null);
+        int factoryCalls = 0;
+
+        cache.GetOrAdd(withTime, _ => { factoryCalls++; return Result(100); });
+        cache.GetOrAdd(withoutTime, _ => { factoryCalls++; return Result(100); });
+        cache.GetOrAdd(withTime, _ => { factoryCalls++; return Result(100); });
+
+        // 有时间的命中缓存（共 2 次评估），null 的每次都评估（3 次中占 1 次）
+        Assert.Equal(2, factoryCalls);
+        Assert.Equal(1, cache.Count);
+    }
+
+    [Fact]
+    public void 缓存_正常身份_仍然只评估一次()
+    {
+        var cache = new SafetyResultCache();
+        var identity = new ProcessIdentity(100, BaseTime);
+        int factoryCalls = 0;
+
+        cache.GetOrAdd(identity, _ => { factoryCalls++; return Result(100); });
+        cache.GetOrAdd(identity, _ => { factoryCalls++; return Result(100); });
+
+        Assert.Equal(1, factoryCalls);
+        Assert.Equal(1, cache.Count);
+    }
 }

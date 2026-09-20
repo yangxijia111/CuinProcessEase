@@ -27,6 +27,8 @@ public sealed class ApplicationDiffResult
 /// <remarks>
 /// 这是稳定列表的核心：UI 层对已存在应用只更新原行对象，绝不 Clear + 全量重建，
 /// 从而保持选择、展开状态与列表顺序。纯逻辑，无 UI 依赖，可直接单元测试。
+/// 同一帧内出现重复 StableKey 属于身份系统故障：立即抛出并指明冲突双方，
+/// 绝不允许"后出现覆盖前一个"的静默吞没。
 /// </remarks>
 public static class ApplicationDiffEngine
 {
@@ -37,32 +39,26 @@ public static class ApplicationDiffEngine
         ArgumentNullException.ThrowIfNull(oldGroups);
         ArgumentNullException.ThrowIfNull(newGroups);
 
-        var oldByKey = new Dictionary<string, ApplicationGroup>(oldGroups.Count, StringComparer.Ordinal);
-        foreach (ApplicationGroup oldGroup in oldGroups)
-        {
-            oldByKey[ApplicationStableKey.Compute(oldGroup)] = oldGroup;
-        }
+        IReadOnlyDictionary<string, ApplicationGroup> oldByKey = BuildKeyMap(oldGroups);
+        IReadOnlyDictionary<string, ApplicationGroup> newByKey = BuildKeyMap(newGroups);
 
         var added = new List<ApplicationGroup>();
         var updated = new List<ApplicationGroup>();
-        var matchedKeys = new HashSet<string>(StringComparer.Ordinal);
 
-        foreach (ApplicationGroup newGroup in newGroups)
+        foreach (KeyValuePair<string, ApplicationGroup> pair in newByKey)
         {
-            string key = ApplicationStableKey.Compute(newGroup);
-            if (oldByKey.ContainsKey(key))
+            if (oldByKey.ContainsKey(pair.Key))
             {
-                updated.Add(newGroup);
-                matchedKeys.Add(key);
+                updated.Add(pair.Value);
             }
             else
             {
-                added.Add(newGroup);
+                added.Add(pair.Value);
             }
         }
 
         var removedKeys = oldByKey.Keys
-            .Where(key => !matchedKeys.Contains(key))
+            .Where(key => !newByKey.ContainsKey(key))
             .ToList();
 
         return new ApplicationDiffResult
@@ -71,5 +67,33 @@ public static class ApplicationDiffEngine
             Updated = updated,
             RemovedKeys = removedKeys,
         };
+    }
+
+    /// <summary>
+    /// 按稳定 Key 建立索引；同一帧出现重复 Key 立即抛出
+    /// <see cref="InvalidOperationException"/>（消息包含冲突双方的显示名），绝不静默覆盖。
+    /// </summary>
+    /// <remarks>
+    /// 正确的 StableKey 规则下真实运行永不触发；此防护保证身份系统的任何未来回归
+    /// 都会立刻显式失败，而不是悄悄丢失一个应用组。
+    /// </remarks>
+    public static IReadOnlyDictionary<string, ApplicationGroup> BuildKeyMap(
+        IReadOnlyList<ApplicationGroup> groups)
+    {
+        ArgumentNullException.ThrowIfNull(groups);
+
+        var map = new Dictionary<string, ApplicationGroup>(groups.Count, StringComparer.Ordinal);
+        foreach (ApplicationGroup group in groups)
+        {
+            string key = ApplicationStableKey.Compute(group);
+            if (!map.TryAdd(key, group))
+            {
+                throw new InvalidOperationException(
+                    $"StableKey 冲突：'{key}' 同时属于 '{map[key].Identity.DisplayName}' 与 " +
+                    $"'{group.Identity.DisplayName}'。同帧出现重复身份，拒绝静默覆盖。");
+            }
+        }
+
+        return map;
     }
 }

@@ -98,4 +98,86 @@ public sealed class ApplicationDiffEngineTests
 
         Assert.True(diff.IsEmpty);
     }
+
+    // ================= 重复 Key 防护（P5.1） =================
+
+    [Fact]
+    public void Diff_新帧出现重复StableKey_抛出异常并指明冲突双方_绝不静默覆盖()
+    {
+        // 两个无 exe、无 Root 的显示名兜底组必然产生相同 name: Key，
+        // 用于构造身份系统故障场景
+        var mystery1 = new ApplicationGroup
+        {
+            Identity = new ApplicationIdentity { DisplayName = "Ghost App" },
+            Processes = [],
+            RootProcesses = [],
+        };
+        var mystery2 = new ApplicationGroup
+        {
+            Identity = new ApplicationIdentity { DisplayName = "Ghost App" },
+            Processes = [],
+            RootProcesses = [],
+        };
+
+        var ex = Assert.Throws<InvalidOperationException>(
+            () => ApplicationDiffEngine.ComputeDiff([], [mystery1, mystery2]));
+
+        Assert.Contains("StableKey 冲突", ex.Message);
+        Assert.Contains("Ghost App", ex.Message);
+        Assert.Contains("拒绝静默覆盖", ex.Message);
+    }
+
+    [Fact]
+    public void Diff_旧帧出现重复StableKey_同样抛出()
+    {
+        var mystery1 = new ApplicationGroup
+        {
+            Identity = new ApplicationIdentity { DisplayName = "Ghost App" },
+            Processes = [],
+            RootProcesses = [],
+        };
+        var mystery2 = new ApplicationGroup
+        {
+            Identity = new ApplicationIdentity { DisplayName = "Ghost App" },
+            Processes = [],
+            RootProcesses = [],
+        };
+        var normal = Group("Chrome", @"c:\chrome.exe", 1);
+
+        Assert.Throws<InvalidOperationException>(
+            () => ApplicationDiffEngine.ComputeDiff([mystery1, mystery2], [normal]));
+    }
+
+    [Fact]
+    public void Diff_两个独立Python同路径_修复后同帧不再冲突()
+    {
+        // P5.1 回归：修复前两个 python 组会生成相同 exe: Key 并被静默吞掉一个；
+        // 修复后 runtime-root 身份保证 Key 唯一，Diff 正常输出两个新增
+        var pyA = new ApplicationGroup
+        {
+            Identity = new ApplicationIdentity
+            {
+                DisplayName = "Python Task A",
+                MainExecutable = @"C:\Python312\python.exe",
+            },
+            Processes = [Snap(100, "python.exe", @"C:\Python312\python.exe")],
+            RootProcesses = [Snap(100, "python.exe", @"C:\Python312\python.exe")],
+        };
+        var pyB = new ApplicationGroup
+        {
+            Identity = new ApplicationIdentity
+            {
+                DisplayName = "Python Task B",
+                MainExecutable = @"C:\Python312\python.exe",
+            },
+            Processes = [Snap(200, "python.exe", @"C:\Python312\python.exe")],
+            RootProcesses = [Snap(200, "python.exe", @"C:\Python312\python.exe")],
+        };
+
+        ApplicationDiffResult diff = ApplicationDiffEngine.ComputeDiff([], [pyA, pyB]);
+
+        Assert.Equal(2, diff.Added.Count);
+        Assert.Empty(diff.Updated);
+        Assert.Empty(diff.RemovedKeys);
+    }
 }
