@@ -5,6 +5,7 @@
     <Project Path="src/CuinProcessEase.Windows/CuinProcessEase.Windows.csproj" />
   </Folder>
   <Folder Name="/tests/">
+    <Project Path="tests/CuinProcessEase.Core.Tests/CuinProcessEase.Core.Tests.csproj" />
     <Project Path="tests/CuinProcessEase.Windows.Tests/CuinProcessEase.Windows.Tests.csproj" />
   </Folder>
 </Solution>

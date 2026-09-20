@@ -109,7 +109,10 @@ public sealed class MainViewModel : ObservableObject, IDisposable
     public void Dispose()
     {
         _refreshTimer.Stop();
-        _captureGate.Dispose();
+
+        // 有意不 Dispose _captureGate：窗口关闭时 Capture 可能仍在飞行中，
+        // 其 finally 里的 Release() 会与 Dispose 产生 ObjectDisposedException 竞态；
+        // SemaphoreSlim 在未使用 WaitHandle 的情况下无非托管资源，交由 GC 回收即可
     }
 }
 
