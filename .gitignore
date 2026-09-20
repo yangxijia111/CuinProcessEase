@@ -1,0 +1,74 @@
+# ---------- 构建产物 ----------
+[Bb]in/
+[Oo]bj/
+[Oo]ut/
+artifacts/
+*.dll
+*.exe
+*.pdb
+
+# ---------- Visual Studio ----------
+.vs/
+*.suo
+*.user
+*.userosscache
+*.sln.docstates
+*.rsuser
+.ipynb_checkpoints
+
+# ---------- Rider / JetBrains ----------
+.idea/
+*.DotSettings.user
+
+# ---------- VS Code ----------
+.vscode/
+
+# ---------- NuGet ----------
+*.nupkg
+**/[Pp]ackages/*
+!**/[Pp]ackages/build/
+*.snupkg
+.nuget/
+
+# ---------- 日志 ----------
+*.log
+logs/
+[Ll]ogs/
+
+# ---------- 测试 / 覆盖率 ----------
+TestResults/
+[Ll]ogs/
+*.coverage
+*.trx
+*.dotcover
+
+# ---------- 发布输出 ----------
+*.publishsettings
+PublishScripts/
+
+# ---------- 用户配置 / 敏感信息 ----------
+*.env
+.env.*
+appsettings.*.local.json
+secrets.json
+*secret*.json
+*Secret*.json
+*.pfx
+*.p12
+*.key
+*.pem
+*.crt
+credentials*.json
+token*.txt
+
+# ---------- 系统临时文件 ----------
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+*.tmp
+*.temp
+~$*
+
+# ---------- 诊断 / 临时脚本 ----------
+.diag/

@@ -1,0 +1,148 @@
+using System.Runtime.InteropServices;
+
+namespace CuinProcessEase.Windows.Native;
+
+/// <summary>
+/// 本文件集中存放快照引擎所需的全部原始 Win32 P/Invoke 声明、结构体与常量。
+/// 仅做声明，不含业务逻辑。
+/// </summary>
+internal static partial class NativeMethods
+{
+    // ---------- 通用 ----------
+
+    public static readonly IntPtr INVALID_HANDLE_VALUE = new(-1);
+
+    public const uint ERROR_NO_MORE_FILES = 18;
+
+    // ---------- Tool Help API（父进程 PID 来源） ----------
+
+    /// <summary>快照包含系统全部进程。</summary>
+    public const uint TH32CS_SNAPPROCESS = 0x00000002;
+
+    /// <summary>PROCESSENTRY32W 结构体大小必须先赋值再调用 API。</summary>
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+    public struct PROCESSENTRY32W
+    {
+        public uint dwSize;
+        public uint cntUsage;
+        public uint th32ProcessID;
+        public IntPtr thDefaultHeap;     // ULONG_PTR，占位保持结构布局
+        public uint th32ModuleID;
+        public uint cntThreads;
+        public uint th32ParentProcessID; // 父进程 PID（PPID）
+        public int pcPriClassBase;       // Win32 LONG，4 字节
+        public uint dwFlags;
+
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 260)]
+        public string szExeFile;         // 进程可执行文件名（含 .exe）
+    }
+
+    [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+    public static extern IntPtr CreateToolhelp32Snapshot(uint dwFlags, uint th32ProcessID);
+
+    [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+    public static extern bool Process32FirstW(IntPtr hSnapshot, ref PROCESSENTRY32W lppe);
+
+    [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+    public static extern bool Process32NextW(IntPtr hSnapshot, ref PROCESSENTRY32W lppe);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    public static extern bool CloseHandle(IntPtr hObject);
+
+    // ---------- 进程查询（路径 / 架构） ----------
+
+    /// <summary>查询进程镜像路径等基础信息所需的最低权限。</summary>
+    public const uint PROCESS_QUERY_LIMITED_INFORMATION = 0x1000;
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    public static extern IntPtr OpenProcess(uint dwDesiredAccess, bool bInheritHandle, uint dwProcessId);
+
+    [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+    public static extern bool QueryFullProcessImageNameW(
+        IntPtr hProcess,
+        uint dwFlags,
+        System.Text.StringBuilder lpExeName,
+        ref uint lpdwSize);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    public static extern bool IsWow64Process(IntPtr hProcess, out bool wow64Process);
+
+    // ---------- 进程架构（IsWow64Process2，Windows 10 1511+） ----------
+
+    /// <summary>IMAGE_FILE_MACHINE_UNKNOWN：进程原生执行（非 WoW64 / 非仿真），架构即本机架构。</summary>
+    public const ushort IMAGE_FILE_MACHINE_UNKNOWN = 0x0000;
+
+    public const ushort IMAGE_FILE_MACHINE_I386 = 0x014C;
+
+    public const ushort IMAGE_FILE_MACHINE_AMD64 = 0x8664;
+
+    public const ushort IMAGE_FILE_MACHINE_ARM64 = 0xAA64;
+
+    /// <summary>IsWow64Process2 函数签名（经 GetProcAddress 动态绑定，旧系统上不可用）。</summary>
+    [UnmanagedFunctionPointer(CallingConvention.Winapi)]
+    public delegate bool IsWow64Process2Delegate(
+        IntPtr hProcess,
+        out ushort processMachine,
+        out ushort nativeMachine);
+
+    [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+    public static extern IntPtr GetModuleHandleW(string lpModuleName);
+
+    [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Ansi)]
+    public static extern IntPtr GetProcAddress(IntPtr hModule, string lpProcName);
+
+    // ---------- 令牌查询（用户名 / 提升状态） ----------
+
+    public const uint TOKEN_QUERY = 0x0008;
+
+    /// <summary>GetTokenInformation 的 TOKEN_OWNER 类别，用于取所有者 SID。</summary>
+    public const int TokenOwner = 1;
+
+    /// <summary>GetTokenInformation 的 TOKEN_ELEVATION 类别，用于判断管理员权限。</summary>
+    public const int TokenElevation = 20;
+
+    [DllImport("advapi32.dll", SetLastError = true)]
+    public static extern bool OpenProcessToken(IntPtr processHandle, uint desiredAccess, out IntPtr tokenHandle);
+
+    [DllImport("advapi32.dll", SetLastError = true)]
+    public static extern bool GetTokenInformation(
+        IntPtr tokenHandle,
+        int tokenInformationClass,
+        IntPtr tokenInformation,
+        uint tokenInformationLength,
+        out uint returnLength);
+
+    [DllImport("advapi32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+    public static extern bool LookupAccountSidW(
+        IntPtr lpSystemName,
+        IntPtr sid,
+        System.Text.StringBuilder lpName,
+        ref uint cchName,
+        System.Text.StringBuilder lpReferencedDomainName,
+        ref uint cchReferencedDomainName,
+        out int peUse);
+
+    // ---------- 系统架构 ----------
+
+    [StructLayout(LayoutKind.Sequential)]
+    public struct SYSTEM_INFO
+    {
+        public ushort wProcessorArchitecture;
+        public ushort wReserved;
+        public uint dwPageSize;
+        public IntPtr lpMinimumApplicationAddress;
+        public IntPtr lpMaximumApplicationAddress;
+        public IntPtr dwActiveProcessorMask;
+        public uint dwNumberOfProcessors;
+        public uint dwProcessorType;
+        public uint dwAllocationGranularity;
+        public ushort wProcessorLevel;
+        public ushort wProcessorRevision;
+    }
+
+    public const ushort PROCESSOR_ARCHITECTURE_AMD64 = 9;
+    public const ushort PROCESSOR_ARCHITECTURE_ARM64 = 12;
+
+    [DllImport("kernel32.dll")]
+    public static extern void GetNativeSystemInfo(out SYSTEM_INFO lpSystemInfo);
+}

@@ -1,0 +1,14 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <!-- 底层 Win32 能力实现，仅在 Windows 上可用 -->
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <AssemblyName>CuinProcessEase.Windows</AssemblyName>
+    <RootNamespace>CuinProcessEase.Windows</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\CuinProcessEase.Core\CuinProcessEase.Core.csproj" />
+  </ItemGroup>
+
+</Project>

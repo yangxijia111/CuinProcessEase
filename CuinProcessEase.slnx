@@ -1,0 +1,10 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/CuinProcessEase.App/CuinProcessEase.App.csproj" />
+    <Project Path="src/CuinProcessEase.Core/CuinProcessEase.Core.csproj" />
+    <Project Path="src/CuinProcessEase.Windows/CuinProcessEase.Windows.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/CuinProcessEase.Core.Tests/CuinProcessEase.Core.Tests.csproj" />
+  </Folder>
+</Solution>

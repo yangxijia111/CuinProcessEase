@@ -1,0 +1,12 @@
+<Project>
+
+  <!-- 公共构建属性：全部项目统一应用 -->
+  <PropertyGroup>
+    <LangVersion>latest</LangVersion>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <!-- 开发文档约定：x64 -->
+    <PlatformTarget>x64</PlatformTarget>
+  </PropertyGroup>
+
+</Project>
