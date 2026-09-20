@@ -130,9 +130,9 @@ public sealed class ProcessTreeBuilderTests
         Assert.All(tree.Roots, r => Assert.Null(r.Parent));
     }
 
-    // PID 0：自引用的空闲进程为根；指向 PID 0 的进程正常连接
+    // PID 0：空闲进程与其余 PPID=0 的进程均为独立根（PPID=0 统一视为 Root）
     [Fact]
-    public void PID零_自身为根_其他进程可挂载()
+    public void PID零_自身为根_PPID为零的进程也为根()
     {
         ProcessTree tree = ProcessTreeBuilder.Build(Collection(
             Snap(0, 0, null, "[System Process]"),
@@ -140,13 +140,10 @@ public sealed class ProcessTreeBuilderTests
 
         Assert.Equal(2, tree.EnumerateAll().Count());
 
-        ProcessNode idle = tree.Roots.Single(r => r.ProcessId == 0);
-        Assert.Null(idle.Parent); // PID 0 的 PPID=0 是自引用，不连
-
-        ProcessNode system = tree.Roots.SelectMany(r => r.Children).Single(c => c.ProcessId == 4);
-        Assert.Same(idle, system.Parent);
-        // 双方 StartTime 均为 null → 低可信度连接
-        Assert.Equal(ParentRelationConfidence.Unverified, system.ParentRelation);
+        // PPID=0 不连接 PID 0 节点：两个节点都是根
+        Assert.Equal(2, tree.Roots.Count);
+        Assert.All(tree.Roots, r => Assert.Null(r.Parent));
+        Assert.All(tree.Roots, r => Assert.Empty(r.Children));
     }
 
     // 7. 人工循环数据：A ↔ B（相等 StartTime 可通过时间校验形成环）

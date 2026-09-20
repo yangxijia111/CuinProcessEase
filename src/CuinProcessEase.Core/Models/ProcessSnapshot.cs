@@ -49,4 +49,19 @@ public sealed class ProcessSnapshot
 
     /// <summary>进程是否以提升（管理员）权限运行。无法读取令牌时为 <c>null</c>。</summary>
     public bool? IsElevated { get; init; }
+
+    /// <summary>进程完整命令行。WMI 等读取途径不可用或权限不足时为 <c>null</c>。</summary>
+    public string? CommandLine { get; init; }
+
+    /// <summary>产品名（来自 exe 版本资源 ProductName）。无版本信息或读取失败为 <c>null</c>。</summary>
+    public string? ProductName { get; init; }
+
+    /// <summary>公司名（来自 exe 版本资源 CompanyName）。无版本信息或读取失败为 <c>null</c>。</summary>
+    public string? CompanyName { get; init; }
+
+    /// <summary>文件描述（来自 exe 版本资源 FileDescription）。无版本信息或读取失败为 <c>null</c>。</summary>
+    public string? FileDescription { get; init; }
+
+    /// <summary>原始文件名（来自 exe 版本资源 OriginalFilename）。无版本信息或读取失败为 <c>null</c>。</summary>
+    public string? OriginalFileName { get; init; }
 }

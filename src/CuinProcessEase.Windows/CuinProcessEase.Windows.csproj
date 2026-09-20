@@ -8,6 +8,11 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <!-- WMI Win32_Process：读取进程命令行的官方稳定接口 -->
+    <PackageReference Include="System.Management" Version="10.0.0" />
+  </ItemGroup>
+
+  <ItemGroup>
     <ProjectReference Include="..\CuinProcessEase.Core\CuinProcessEase.Core.csproj" />
   </ItemGroup>
 

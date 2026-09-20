@@ -1,5 +1,7 @@
+using System.Collections.Concurrent;
 using System.ComponentModel;
 using System.Diagnostics;
+using System.Management;
 using System.Runtime.InteropServices;
 using System.Text;
 using CuinProcessEase.Core.Interfaces;
@@ -46,6 +48,11 @@ public sealed class ProcessSnapshotService : IProcessSnapshotService
             toolhelpEntries = new Dictionary<int, ToolhelpProcessEntry>();
         }
 
+        // 命令行来自 WMI Win32_Process（官方稳定只读接口，普通权限下仅能读到
+        // 当前用户/有权限进程；不注入、不开 DebugPrivilege、不解析 PEB）。
+        // WMI 不可用时返回空表，全部进程 CommandLine 为 null，不影响扫描
+        Dictionary<int, string?> commandLines = CaptureCommandLines();
+
         Process[] processes = Process.GetProcesses();
         var snapshots = new List<ProcessSnapshot>(processes.Length);
 
@@ -57,7 +64,7 @@ public sealed class ProcessSnapshotService : IProcessSnapshotService
 
                 try
                 {
-                    snapshots.Add(CreateSnapshot(process, toolhelpEntries));
+                    snapshots.Add(CreateSnapshot(process, toolhelpEntries, commandLines));
                 }
                 catch
                 {
@@ -89,7 +96,8 @@ public sealed class ProcessSnapshotService : IProcessSnapshotService
 
     private static ProcessSnapshot CreateSnapshot(
         Process process,
-        IReadOnlyDictionary<int, ToolhelpProcessEntry> toolhelpEntries)
+        IReadOnlyDictionary<int, ToolhelpProcessEntry> toolhelpEntries,
+        IReadOnlyDictionary<int, string?> commandLines)
     {
         int pid = process.Id;
         toolhelpEntries.TryGetValue(pid, out ToolhelpProcessEntry? entry);
@@ -156,6 +164,14 @@ public sealed class ProcessSnapshotService : IProcessSnapshotService
             executablePath = TryReadString(() => process.MainModule?.FileName);
         }
 
+        // 版本资源信息：路径可读时从 exe 文件读取（同路径多实例共享缓存）；
+        // 任何失败全部保持 null，不影响快照
+        ReadVersionInfo(executablePath,
+            out string? productName,
+            out string? companyName,
+            out string? fileDescription,
+            out string? originalFileName);
+
         return new ProcessSnapshot
         {
             Identity = new ProcessIdentity(pid, startTimeUtc),
@@ -168,7 +184,111 @@ public sealed class ProcessSnapshotService : IProcessSnapshotService
             UserName = userName,
             Architecture = architecture,
             IsElevated = isElevated,
+            CommandLine = commandLines.TryGetValue(pid, out string? commandLine) ? commandLine : null,
+            ProductName = productName,
+            CompanyName = companyName,
+            FileDescription = fileDescription,
+            OriginalFileName = originalFileName,
         };
+    }
+
+    /// <summary>
+    /// 版本信息缓存：同一路径的多个进程实例（如 16 个 chrome.exe）只读一次磁盘。
+    /// 缓存失败结果（null）避免反复开销；上限保护防止路径无限增长。
+    /// </summary>
+    private static readonly ConcurrentDictionary<string, FileVersionInfo?> VersionInfoCache = new();
+
+    private static void ReadVersionInfo(
+        string? executablePath,
+        out string? productName,
+        out string? companyName,
+        out string? fileDescription,
+        out string? originalFileName)
+    {
+        productName = null;
+        companyName = null;
+        fileDescription = null;
+        originalFileName = null;
+
+        if (executablePath is null)
+        {
+            return;
+        }
+
+        if (VersionInfoCache.Count > 4096)
+        {
+            // 粗粒度上限保护：正常机器唯一 exe 路径数远小于此
+            VersionInfoCache.Clear();
+        }
+
+        FileVersionInfo? info = VersionInfoCache.GetOrAdd(executablePath, path =>
+        {
+            try
+            {
+                return FileVersionInfo.GetVersionInfo(path);
+            }
+            catch
+            {
+                // 文件不存在 / 被锁 / 无版本资源：缓存 null，不再重复失败
+                return null;
+            }
+        });
+
+        if (info is null)
+        {
+            return;
+        }
+
+        productName = OrNull(info.ProductName);
+        companyName = OrNull(info.CompanyName);
+        fileDescription = OrNull(info.FileDescription);
+        originalFileName = OrNull(info.OriginalFilename);
+    }
+
+    private static string? OrNull(string? value)
+        => string.IsNullOrWhiteSpace(value) ? null : value.Trim();
+
+    /// <summary>
+    /// 通过 WMI Win32_Process 一次性读取全部进程命令行（官方稳定只读接口）。
+    /// 任何系统级失败返回空表，CommandLine 全部保持 null，不影响扫描。
+    /// </summary>
+    private static Dictionary<int, string?> CaptureCommandLines()
+    {
+        var result = new Dictionary<int, string?>(256);
+        try
+        {
+            using ManagementObjectSearcher searcher = new(
+                "SELECT ProcessId, CommandLine FROM Win32_Process");
+
+            foreach (ManagementBaseObject managementObject in searcher.Get())
+            {
+                try
+                {
+                    object? pidValue = managementObject["ProcessId"];
+                    if (pidValue is null)
+                    {
+                        continue;
+                    }
+
+                    result[Convert.ToInt32(pidValue)] =
+                        managementObject["CommandLine"] as string;
+                }
+                catch
+                {
+                    // 单条记录损坏跳过，不影响其余
+                }
+                finally
+                {
+                    try { managementObject.Dispose(); } catch { /* 忽略 */ }
+                }
+            }
+        }
+        catch
+        {
+            // WMI 服务不可用等系统级失败：命令行整体缺失，安全降级
+        }
+
+        return result;
     }
 
     /// <summary>

@@ -7,7 +7,8 @@ namespace CuinProcessEase.Core.Tree;
 /// </summary>
 /// <remarks>
 /// 纯 Core 逻辑，不依赖 WPF / Win32。
-/// 算法为 O(n)：PID 字典索引 + 单次连接 + 三色环检测，不引入并行化。
+/// 算法整体为 O(n) 均摊（PID 字典索引 + 单遍连接 + 三色环检测，
+/// 环路径回溯在正常数据下为常数级），不引入并行化。
 /// 原则：宁可成为 Root / Orphan，绝不错误连接。
 /// </remarks>
 public static class ProcessTreeBuilder
@@ -81,6 +82,13 @@ public static class ProcessTreeBuilder
         int? parentPid = node.Process.ParentProcessId;
         if (parentPid is null)
         {
+            return;
+        }
+
+        if (parentPid.Value == 0)
+        {
+            // PPID 0 统一视为 Root：不连接 PID 0（System Idle Process）节点，
+            // 该伪进程无真实父子语义
             return;
         }
 

@@ -8,7 +8,7 @@ public sealed class ProcessTree
     /// <summary>全部根节点（含 Orphan），按 PID 升序。</summary>
     public required IReadOnlyList<ProcessNode> Roots { get; init; }
 
-    /// <summary>树中节点总数（等于输入快照的有效进程数）。</summary>
+    /// <summary>树中节点总数：即输入快照去重后的“唯一 PID 节点数”（重复 PID 只保留第一个）。</summary>
     public int TotalCount { get; internal set; }
 
     /// <summary>

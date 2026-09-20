@@ -78,8 +78,10 @@ public sealed class ProcessSnapshotServiceTests
     [Fact]
     public async Task 进程退出后_下一次快照不再包含该PID()
     {
-        // 启动一个存活约 30 秒的探测进程，验证出现→退出→消失的完整生命周期
-        using Process probe = Process.Start(new ProcessStartInfo(CmdPath, "/c timeout /t 30 /nobreak")
+        // 启动一个存活约 30 秒的探测进程，验证出现→退出→消失的完整生命周期。
+        // 使用 ping 而非 timeout：timeout 在无控制台输入重定向下会立即退出，
+        // 而 WMI 命令行查询使扫描前置耗时约 1 秒，会错过短命探测进程
+        using Process probe = Process.Start(new ProcessStartInfo(CmdPath, "/c ping -n 31 127.0.0.1 > nul")
         {
             UseShellExecute = false,
             CreateNoWindow = true,
@@ -232,5 +234,71 @@ public sealed class ProcessSnapshotServiceTests
             Assert.NotEmpty(r.Processes);
             Assert.Contains(r.Processes, p => p.ProcessId == Environment.ProcessId);
         });
+    }
+
+    // ================= Phase 3：元数据读取 =================
+
+    [Fact]
+    public async Task 命令行_当前进程可读取()
+    {
+        ProcessSnapshotCollection snapshot = await CaptureAsync();
+
+        ProcessSnapshot self = snapshot.Processes.Single(p => p.ProcessId == Environment.ProcessId);
+
+        // WMI 正常时自身命令行可读（testhost 启动命令行非空）
+        Assert.NotNull(self.CommandLine);
+        Assert.False(string.IsNullOrWhiteSpace(self.CommandLine));
+    }
+
+    [Fact]
+    public async Task 版本信息_自身进程可安全读取()
+    {
+        ProcessSnapshotCollection snapshot = await CaptureAsync();
+
+        ProcessSnapshot self = snapshot.Processes.Single(p => p.ProcessId == Environment.ProcessId);
+
+        // testhost 是 .NET 官方程序集，至少应具备部分版本信息；
+        // 存在则必须是有效格式（非空字符串，.NET FileVersionInfo 不会返回空白以外的脏值）
+        if (self.ProductName is not null)
+        {
+            Assert.False(string.IsNullOrWhiteSpace(self.ProductName));
+        }
+
+        if (self.CompanyName is not null)
+        {
+            Assert.False(string.IsNullOrWhiteSpace(self.CompanyName));
+        }
+    }
+
+    [Fact]
+    public async Task 元数据字段_全快照格式安全()
+    {
+        ProcessSnapshotCollection snapshot = await CaptureAsync();
+
+        // 任何进程：五个元数据字段要么 null 要么非空字符串；绝不出现空串或空白串
+        Assert.All(snapshot.Processes, p =>
+        {
+            Assert.True(p.CommandLine is null || !string.IsNullOrWhiteSpace(p.CommandLine));
+            Assert.True(p.ProductName is null || !string.IsNullOrWhiteSpace(p.ProductName));
+            Assert.True(p.CompanyName is null || !string.IsNullOrWhiteSpace(p.CompanyName));
+            Assert.True(p.FileDescription is null || !string.IsNullOrWhiteSpace(p.FileDescription));
+            Assert.True(p.OriginalFileName is null || !string.IsNullOrWhiteSpace(p.OriginalFileName));
+        });
+    }
+
+    [Fact]
+    public async Task 系统保护进程_元数据读取失败安全降级()
+    {
+        ProcessSnapshotCollection snapshot = await CaptureAsync();
+
+        // PID 0（System Idle Process）打不开句柄也读不到版本信息：
+        // 路径 / 元数据 / 命令行全部为 null，但进程仍在快照中（不崩溃、不丢失）
+        ProcessSnapshot idle = snapshot.Processes.Single(p => p.ProcessId == 0);
+
+        Assert.Null(idle.ExecutablePath);
+        Assert.Null(idle.ProductName);
+        Assert.Null(idle.CompanyName);
+        Assert.Null(idle.FileDescription);
+        Assert.Null(idle.OriginalFileName);
     }
 }
