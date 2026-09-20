@@ -1,5 +1,6 @@
 using CuinProcessEase.Core.Models;
 using CuinProcessEase.Core.Safety;
+using CuinProcessEase.Windows.Native;
 
 namespace CuinProcessEase.Windows.Safety;
 
@@ -12,7 +13,8 @@ namespace CuinProcessEase.Windows.Safety;
 /// 1. Self（自身 / CuinProcessEase 程序）→ Protected / Blocked；
 /// 2. 关键名单（System/lsass/csrss/...）→ Protected / Blocked；
 /// 3. IsProcessCritical 实测 true → Protected / Blocked；
-/// 4. ProtectionLevel != NONE → Protected / Blocked（区分 PP / PPL）；
+/// 4. ProtectionLevel != NONE(0xFFFFFFFE) → Protected / Blocked（区分 PP / PPL，
+///    注意 0 是有效保护级别 WinTcb-Light，NONE 才是无保护）；
 /// 5. 系统证据（SYSTEM 账户 / Session 0 / Windows 路径组合）→ System / Blocked；
 /// 6. IsElevated == true → Elevated / RequiresElevation；
 /// 7. 身份信息不足（无路径且无用户名）→ Unknown / Indeterminate；
@@ -37,7 +39,7 @@ internal static class SafetyDecisionEngine
         ProcessSnapshot process,
         bool isSelf,
         bool? isCritical,
-        int? protectionLevel)
+        PROTECTION_LEVEL? protectionLevel)
     {
         SafetyReason reasons = SafetyReason.None;
 
@@ -62,8 +64,8 @@ internal static class SafetyDecisionEngine
                 SafetyReason.CriticalWindowsProcess, isCritical, protectionLevel);
         }
 
-        // 4. PPL / 保护进程
-        if (protectionLevel is > 0)
+        // 4. PP / PPL：仅 NONE（0xFFFFFFFE）代表无保护；未知值按受保护处理（fail-closed）
+        if (protectionLevel is not null and not PROTECTION_LEVEL.PROTECTION_LEVEL_NONE)
         {
             SafetyReason protectionReason = IsProtectionLightLevel(protectionLevel.Value)
                 ? SafetyReason.ProtectedProcessLight
@@ -127,9 +129,18 @@ internal static class SafetyDecisionEngine
             reasons, isCritical, protectionLevel);
     }
 
-    /// <summary>PPL（Lite）系列保护级别：1/3/5 与 Antimalware(6，PPL-AM)。</summary>
-    private static bool IsProtectionLightLevel(int level)
-        => level is 1 or 3 or 5 or 6;
+    /// <summary>
+    /// PP（完整保护）级别：WINDOWS / WINTCB / AUTHENTICODE；
+    /// 其余（WINTCB_LIGHT / WINDOWS_LIGHT / ANTIMALWARE_LIGHT / LSA_LIGHT /
+    /// CODEGEN_LIGHT / PPL_APP 及未知级别）归入 PPL（Light）系列。
+    /// </summary>
+    private static bool IsProtectionLightLevel(PROTECTION_LEVEL level) => level switch
+    {
+        PROTECTION_LEVEL.PROTECTION_LEVEL_WINDOWS
+            or PROTECTION_LEVEL.PROTECTION_LEVEL_WINTCB
+            or PROTECTION_LEVEL.PROTECTION_LEVEL_AUTHENTICODE => false,
+        _ => true,
+    };
 
     private static ProcessSafetyResult Result(
         ProcessSnapshot process,
@@ -137,7 +148,7 @@ internal static class SafetyDecisionEngine
         SafetyDecision decision,
         SafetyReason reasons,
         bool? isCritical,
-        int? protectionLevel) => new()
+        PROTECTION_LEVEL? protectionLevel) => new()
     {
         Identity = process.Identity,
         ProcessName = process.Name,
@@ -145,6 +156,6 @@ internal static class SafetyDecisionEngine
         Decision = decision,
         Reasons = reasons,
         IsCritical = isCritical,
-        ProtectionLevel = protectionLevel,
+        ProtectionLevel = protectionLevel is null ? null : (uint)protectionLevel.Value,
     };
 }

@@ -25,7 +25,7 @@ public sealed class ProcessSafetyService : IProcessSafetyService
         bool isSelf = process.ProcessId == Environment.ProcessId;
 
         bool? isCritical;
-        int? protectionLevel;
+        PROTECTION_LEVEL? protectionLevel;
 
         IntPtr handle = NativeMethods.OpenProcess(
             NativeMethods.PROCESS_QUERY_LIMITED_INFORMATION, bInheritHandle: false, (uint)process.ProcessId);
@@ -86,20 +86,21 @@ public sealed class ProcessSafetyService : IProcessSafetyService
     }
 
     /// <summary>
-    /// ProtectionLevel 查询：成功返回 0-6 原始级别；失败返回未知（null，绝不当 NONE）。
+    /// ProtectionLevel 查询：成功返回原始 PROTECTION_LEVEL（无保护为 NONE=0xFFFFFFFE，
+    /// 而非 0——0 是有效级别 WinTcb-Light）；失败返回未知（null，绝不当 NONE）。
     /// </summary>
-    private static int? QueryProtectionLevel(IntPtr processHandle)
+    private static PROTECTION_LEVEL? QueryProtectionLevel(IntPtr processHandle)
     {
         try
         {
             var info = new NativeMethods.PROCESS_PROTECTION_LEVEL_INFORMATION();
             if (NativeMethods.GetProcessInformation(
                     processHandle,
-                    NativeMethods.ProcessProtectionLevelInfo,
+                    PROCESS_INFORMATION_CLASS.ProcessProtectionLevelInfo,
                     ref info,
                     System.Runtime.InteropServices.Marshal.SizeOf<NativeMethods.PROCESS_PROTECTION_LEVEL_INFORMATION>()))
             {
-                return unchecked((int)info.ProtectionLevel);
+                return unchecked((PROTECTION_LEVEL)info.ProtectionLevel);
             }
 
             return null;

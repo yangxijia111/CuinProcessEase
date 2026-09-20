@@ -1,5 +1,6 @@
 using CuinProcessEase.Core.Models;
 using CuinProcessEase.Core.Safety;
+using CuinProcessEase.Windows.Native;
 using CuinProcessEase.Windows.Safety;
 using Xunit;
 
@@ -37,7 +38,8 @@ public sealed class ProcessSafetyServiceTests
     public void 决策引擎_IsProcessCritical为true_Protected_Blocked()
     {
         ProcessSafetyResult result = SafetyDecisionEngine.Evaluate(
-            Snap(100, "someapp.exe"), isSelf: false, isCritical: true, protectionLevel: 0);
+            Snap(100, "someapp.exe"), isSelf: false, isCritical: true,
+            protectionLevel: PROTECTION_LEVEL.PROTECTION_LEVEL_NONE);
 
         Assert.Equal(RiskLevel.Protected, result.RiskLevel);
         Assert.Equal(SafetyDecision.Blocked, result.Decision);
@@ -46,19 +48,63 @@ public sealed class ProcessSafetyServiceTests
     }
 
     [Fact]
-    public void 决策引擎_PPL保护级别_Protected_Blocked_区分PP与PPL()
+    public void 决策引擎_PP与PPL级别_Protected_Blocked_区分PP与PPL()
     {
-        // PPL (Lite=1)
+        // PPL-AM（Antimalware-Light = 3）：如 MsMpEng.exe
         ProcessSafetyResult ppl = SafetyDecisionEngine.Evaluate(
-            Snap(100, "MsMpEng.exe"), isSelf: false, isCritical: false, protectionLevel: 1);
+            Snap(100, "MsMpEng.exe"), isSelf: false, isCritical: false,
+            protectionLevel: PROTECTION_LEVEL.PROTECTION_LEVEL_ANTIMALWARE_LIGHT);
         Assert.Equal(RiskLevel.Protected, ppl.RiskLevel);
+        Assert.Equal(SafetyDecision.Blocked, ppl.Decision);
         Assert.True(ppl.Reasons.HasFlag(SafetyReason.ProtectedProcessLight));
 
-        // PP (Windows=2)
+        // PP（Windows = 1）
         ProcessSafetyResult pp = SafetyDecisionEngine.Evaluate(
-            Snap(100, "protected.exe"), isSelf: false, isCritical: false, protectionLevel: 2);
+            Snap(100, "protected.exe"), isSelf: false, isCritical: false,
+            protectionLevel: PROTECTION_LEVEL.PROTECTION_LEVEL_WINDOWS);
         Assert.Equal(RiskLevel.Protected, pp.RiskLevel);
+        Assert.Equal(SafetyDecision.Blocked, pp.Decision);
         Assert.True(pp.Reasons.HasFlag(SafetyReason.ProtectedProcess));
+    }
+
+    [Theory]
+    [InlineData(PROTECTION_LEVEL.PROTECTION_LEVEL_WINTCB_LIGHT, SafetyReason.ProtectedProcessLight)]
+    [InlineData(PROTECTION_LEVEL.PROTECTION_LEVEL_WINDOWS, SafetyReason.ProtectedProcess)]
+    [InlineData(PROTECTION_LEVEL.PROTECTION_LEVEL_WINDOWS_LIGHT, SafetyReason.ProtectedProcessLight)]
+    [InlineData(PROTECTION_LEVEL.PROTECTION_LEVEL_ANTIMALWARE_LIGHT, SafetyReason.ProtectedProcessLight)]
+    [InlineData(PROTECTION_LEVEL.PROTECTION_LEVEL_LSA_LIGHT, SafetyReason.ProtectedProcessLight)]
+    [InlineData(PROTECTION_LEVEL.PROTECTION_LEVEL_WINTCB, SafetyReason.ProtectedProcess)]
+    [InlineData(PROTECTION_LEVEL.PROTECTION_LEVEL_CODEGEN_LIGHT, SafetyReason.ProtectedProcessLight)]
+    [InlineData(PROTECTION_LEVEL.PROTECTION_LEVEL_AUTHENTICODE, SafetyReason.ProtectedProcess)]
+    [InlineData(PROTECTION_LEVEL.PROTECTION_LEVEL_PPL_APP, SafetyReason.ProtectedProcessLight)]
+    public void 决策引擎_全部实际保护级别0到8_均Protected且正确区分PP与PPL(
+        PROTECTION_LEVEL level, SafetyReason expectedReason)
+    {
+        // 回归：0 是有效保护级别（WinTcb-Light），旧实现 `is > 0` 会漏判
+        ProcessSafetyResult result = SafetyDecisionEngine.Evaluate(
+            Snap(100, "someproc.exe"), isSelf: false, isCritical: false, protectionLevel: level);
+
+        Assert.Equal(RiskLevel.Protected, result.RiskLevel);
+        Assert.Equal(SafetyDecision.Blocked, result.Decision);
+        Assert.True(result.Reasons.HasFlag(expectedReason),
+            $"级别 {level} 应为 {expectedReason}，实际 {result.Reasons}");
+        // 原始 DWORD 保留在结果中供日志/详情使用
+        Assert.Equal((uint)level, result.ProtectionLevel);
+    }
+
+    [Fact]
+    public void 决策引擎_无保护NONE_0xFFFFFFFE_不触发Protected()
+    {
+        // NONE = 0xFFFFFFFE（不是 0）：普通进程查询结果，应继续走后续判定
+        ProcessSafetyResult result = SafetyDecisionEngine.Evaluate(
+            Snap(100, "normal.exe"), isSelf: false, isCritical: false,
+            protectionLevel: PROTECTION_LEVEL.PROTECTION_LEVEL_NONE);
+
+        Assert.Equal(RiskLevel.Normal, result.RiskLevel);
+        Assert.Equal(SafetyDecision.Allowed, result.Decision);
+        Assert.False(result.Reasons.HasFlag(SafetyReason.ProtectedProcess));
+        Assert.False(result.Reasons.HasFlag(SafetyReason.ProtectedProcessLight));
+        Assert.Equal(0xFFFFFFFEu, result.ProtectionLevel);
     }
 
     [Fact]
@@ -92,7 +138,7 @@ public sealed class ProcessSafetyServiceTests
     public void 决策引擎_管理员普通应用_Elevated_RequiresElevation而非Blocked()
     {
         ProcessSafetyResult result = SafetyDecisionEngine.Evaluate(
-            Snap(100, "notepad.exe", elevated: true), isSelf: false, isCritical: false, protectionLevel: 0);
+            Snap(100, "notepad.exe", elevated: true), isSelf: false, isCritical: false, protectionLevel: PROTECTION_LEVEL.PROTECTION_LEVEL_NONE);
 
         Assert.Equal(RiskLevel.Elevated, result.RiskLevel);
         Assert.Equal(SafetyDecision.RequiresElevation, result.Decision);
@@ -104,7 +150,7 @@ public sealed class ProcessSafetyServiceTests
     {
         ProcessSafetyResult result = SafetyDecisionEngine.Evaluate(
             Snap(100, "somesvc.exe", user: @"NT AUTHORITY\SYSTEM", session: 0),
-            isSelf: false, isCritical: false, protectionLevel: 0);
+            isSelf: false, isCritical: false, protectionLevel: PROTECTION_LEVEL.PROTECTION_LEVEL_NONE);
 
         Assert.Equal(RiskLevel.System, result.RiskLevel);
         Assert.Equal(SafetyDecision.Blocked, result.Decision);
@@ -118,7 +164,7 @@ public sealed class ProcessSafetyServiceTests
         // 用户在会话 1 运行 System32\notepad.exe：路径在 C:\Windows 下但不是系统进程
         ProcessSafetyResult result = SafetyDecisionEngine.Evaluate(
             Snap(100, "notepad.exe", path: @"C:\Windows\System32\notepad.exe", session: 1),
-            isSelf: false, isCritical: false, protectionLevel: 0);
+            isSelf: false, isCritical: false, protectionLevel: PROTECTION_LEVEL.PROTECTION_LEVEL_NONE);
 
         Assert.Equal(RiskLevel.Normal, result.RiskLevel);
         Assert.Equal(SafetyDecision.Allowed, result.Decision);
@@ -128,12 +174,12 @@ public sealed class ProcessSafetyServiceTests
     public void 决策引擎_自身进程_永远Blocked()
     {
         ProcessSafetyResult byName = SafetyDecisionEngine.Evaluate(
-            Snap(100, "CuinProcessEase.exe"), isSelf: false, isCritical: false, protectionLevel: 0);
+            Snap(100, "CuinProcessEase.exe"), isSelf: false, isCritical: false, protectionLevel: PROTECTION_LEVEL.PROTECTION_LEVEL_NONE);
         Assert.Equal(SafetyDecision.Blocked, byName.Decision);
         Assert.True(byName.Reasons.HasFlag(SafetyReason.SelfProcess));
 
         ProcessSafetyResult byPid = SafetyDecisionEngine.Evaluate(
-            Snap(100, "anything.exe"), isSelf: true, isCritical: false, protectionLevel: 0);
+            Snap(100, "anything.exe"), isSelf: true, isCritical: false, protectionLevel: PROTECTION_LEVEL.PROTECTION_LEVEL_NONE);
         Assert.Equal(SafetyDecision.Blocked, byPid.Decision);
         Assert.True(byPid.Reasons.HasFlag(SafetyReason.SelfProcess));
     }
@@ -212,6 +258,10 @@ public sealed class ProcessSafetyServiceTests
 
         Assert.Equal(RiskLevel.Normal, result.RiskLevel);
         Assert.Equal(SafetyDecision.Allowed, result.Decision);
+        // 普通应用无保护：查询应返回 NONE（0xFFFFFFFE）或查询失败（null），绝不是某个 PP/PPL 级别
+        Assert.True(
+            result.ProtectionLevel is null or (uint)PROTECTION_LEVEL.PROTECTION_LEVEL_NONE,
+            $"普通应用 ProtectionLevel 应为 NONE/null，实际 {result.ProtectionLevel}");
     }
 
     [Fact]
@@ -248,9 +298,12 @@ public sealed class ProcessSafetyServiceTests
 
         Assert.Equal(RiskLevel.Protected, result.RiskLevel);
         Assert.Equal(SafetyDecision.Blocked, result.Decision);
-        // PPL-AM：实测 ProtectionLevel 应为 6（Antimalware）；查询不到也应被名单外的
+        // PPL-AM：实测 ProtectionLevel 应为 3（ANTIMALWARE_LIGHT = 0x3）；查询不到也应被
         // SYSTEM 账户兜底为 System/Blocked，绝不允许 Allowed
         Assert.NotEqual(SafetyDecision.Allowed, result.Decision);
+        Assert.True(
+            result.ProtectionLevel is null or (uint)PROTECTION_LEVEL.PROTECTION_LEVEL_ANTIMALWARE_LIGHT,
+            $"MsMpEng ProtectionLevel 应为 ANTIMALWARE_LIGHT(3)/null，实际 {result.ProtectionLevel}");
     }
 
     [Fact]

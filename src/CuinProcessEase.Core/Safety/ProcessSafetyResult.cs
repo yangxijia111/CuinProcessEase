@@ -30,10 +30,11 @@ public sealed class ProcessSafetyResult
     public bool? IsCritical { get; init; }
 
     /// <summary>
-    /// 原始 Windows Protection Level（0=NONE，1-6 为各类 PP/PPL）；查询失败为 null。
+    /// 原始 Windows PROTECTION_LEVEL（WinBase.h：0-8 为各类 PP/PPL，
+    /// 其中 0 = WinTcb-Light；0xFFFFFFFE = NONE 无保护）；查询失败为 null。
     /// 保留原始值供日志与高级详情使用。
     /// </summary>
-    public int? ProtectionLevel { get; init; }
+    public uint? ProtectionLevel { get; init; }
 
     /// <summary>便捷访问：决策是否为需要管理员权限。</summary>
     public bool RequiresElevation => Decision == SafetyDecision.RequiresElevation;
