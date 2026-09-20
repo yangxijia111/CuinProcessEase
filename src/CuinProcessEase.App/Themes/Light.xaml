@@ -1,0 +1,34 @@
+<ResourceDictionary xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+                    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+
+    <!-- Light 主题画刷：与 Dark.xaml 键完全一致，运行时整体替换 -->
+
+    <SolidColorBrush x:Key="Brush.Window.Background" Color="#FFF3F3F7" />
+    <SolidColorBrush x:Key="Brush.Surface.Background" Color="#FFFFFFFF" />
+    <SolidColorBrush x:Key="Brush.Surface.Hover" Color="#FFECEDF3" />
+    <SolidColorBrush x:Key="Brush.Surface.Border" Color="#FFE2E3EA" />
+
+    <SolidColorBrush x:Key="Brush.Row.Hover" Color="#FFEDEEF4" />
+    <SolidColorBrush x:Key="Brush.Row.Selected" Color="#FFDBE5F8" />
+
+    <SolidColorBrush x:Key="Brush.Text.Primary" Color="#FF1B1B20" />
+    <SolidColorBrush x:Key="Brush.Text.Secondary" Color="#FF6B6B76" />
+
+    <SolidColorBrush x:Key="Brush.Accent" Color="#FF2E6BE6" />
+    <SolidColorBrush x:Key="Brush.Accent.Subtle" Color="#FFDCE7FB" />
+
+    <SolidColorBrush x:Key="Brush.Input.Background" Color="#FFFFFFFF" />
+    <SolidColorBrush x:Key="Brush.Input.Border" Color="#FFD6D7E0" />
+
+    <!-- 安全状态 -->
+    <SolidColorBrush x:Key="Brush.Status.Ok" Color="#FF16A34A" />
+    <SolidColorBrush x:Key="Brush.Status.Warning" Color="#FFB45309" />
+    <SolidColorBrush x:Key="Brush.Status.Unknown" Color="#FF6B6B76" />
+    <SolidColorBrush x:Key="Brush.Status.Danger" Color="#FFDC2626" />
+
+    <!-- 安全状态标签底色（半透明叠加，两套主题各自调对比） -->
+    <SolidColorBrush x:Key="Brush.Chip.Ok.Background" Color="#1F16A34A" />
+    <SolidColorBrush x:Key="Brush.Chip.Warning.Background" Color="#1FB45309" />
+    <SolidColorBrush x:Key="Brush.Chip.Unknown.Background" Color="#146B6B76" />
+    <SolidColorBrush x:Key="Brush.Chip.Danger.Background" Color="#1FDC2626" />
+</ResourceDictionary>

@@ -14,6 +14,37 @@ namespace CuinProcessEase.Windows.ProcessApi;
 public sealed class ProcessCommandLineProvider
 {
     /// <summary>
+    /// 按需读取单个进程的命令行（WMI 单条查询，避免全表扫描的 1 秒开销）。
+    /// 进程已退出 / 权限不足 / WMI 不可用返回 null，绝不抛出。
+    /// </summary>
+    public string? Capture(int processId)
+    {
+        try
+        {
+            using ManagementObjectSearcher searcher = new(
+                $"SELECT CommandLine FROM Win32_Process WHERE ProcessId = {processId}");
+
+            foreach (ManagementBaseObject managementObject in searcher.Get())
+            {
+                try
+                {
+                    return managementObject["CommandLine"] as string;
+                }
+                finally
+                {
+                    try { managementObject.Dispose(); } catch { /* 忽略 */ }
+                }
+            }
+
+            return null;
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    /// <summary>
     /// 读取当前全部进程的命令行，返回 PID → 命令行 映射。
     /// WMI 不可用等系统级失败返回空表，绝不抛出。
     /// </summary>

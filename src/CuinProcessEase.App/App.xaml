@@ -1,7 +1,16 @@
 <Application x:Class="CuinProcessEase.App.App"
              xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
              xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-             StartupUri="Views/MainWindow.xaml">
+             StartupUri="Views/MainWindow.xaml"
+             DispatcherUnhandledException="Application_DispatcherUnhandledException">
     <Application.Resources>
+        <ResourceDictionary>
+            <ResourceDictionary.MergedDictionaries>
+                <!-- 主题画刷（索引 0，ThemeManager 运行时整体替换 Dark/Light） -->
+                <ResourceDictionary Source="pack://application:,,,/CuinProcessEase.App;component/Themes/Dark.xaml" />
+                <!-- 控件样式（DynamicResource 引用主题画刷） -->
+                <ResourceDictionary Source="pack://application:,,,/CuinProcessEase.App;component/Themes/Controls.xaml" />
+            </ResourceDictionary.MergedDictionaries>
+        </ResourceDictionary>
     </Application.Resources>
 </Application>

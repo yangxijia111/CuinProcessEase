@@ -163,4 +163,33 @@ internal static partial class NativeMethods
 
     [DllImport("kernel32.dll")]
     public static extern void GetNativeSystemInfo(out SYSTEM_INFO lpSystemInfo);
+
+    // ---------- 系统资源（Overview 栏） ----------
+
+    /// <summary>
+    /// 系统全局时间：内核时间（含 Idle）与用户时间（FILETIME 100ns）。
+    /// CPU% = (Δkernel + Δuser − Δidle) / (Δkernel + Δuser) × 100。
+    /// </summary>
+    [DllImport("kernel32.dll", SetLastError = true)]
+    public static extern bool GetSystemTimes(
+        out System.Runtime.InteropServices.ComTypes.FILETIME lpIdleTime,
+        out System.Runtime.InteropServices.ComTypes.FILETIME lpKernelTime,
+        out System.Runtime.InteropServices.ComTypes.FILETIME lpUserTime);
+
+    [StructLayout(LayoutKind.Sequential)]
+    public struct MEMORYSTATUSEX
+    {
+        public uint dwLength;          // 调用前必须设为 Marshal.SizeOf<MEMORYSTATUSEX>()
+        public uint dwMemoryLoad;      // 物理内存占用百分比 0-100
+        public ulong ullTotalPhys;
+        public ulong ullAvailPhys;
+        public ulong ullTotalPageFile;
+        public ulong ullAvailPageFile;
+        public ulong ullTotalVirtual;
+        public ulong ullAvailVirtual;
+        public ulong ullAvailExtendedVirtual;
+    }
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    public static extern bool GlobalMemoryStatusEx(ref MEMORYSTATUSEX lpBuffer);
 }
