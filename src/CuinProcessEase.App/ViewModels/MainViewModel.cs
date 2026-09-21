@@ -11,10 +11,12 @@ using CuinProcessEase.Core.Interfaces;
 using CuinProcessEase.Core.Models;
 using CuinProcessEase.Core.Resources;
 using CuinProcessEase.Core.Safety;
+using CuinProcessEase.Core.Termination;
 using CuinProcessEase.Windows.ProcessApi;
 using CuinProcessEase.Windows.Resources;
 using CuinProcessEase.Windows.Safety;
 using CuinProcessEase.Windows.Services;
+using CuinProcessEase.Windows.Termination;
 
 namespace CuinProcessEase.App.ViewModels;
 
@@ -33,6 +35,7 @@ public sealed class MainViewModel : ObservableObject, IDisposable
 
     private readonly IProcessSnapshotService _snapshotService = new ProcessSnapshotService();
     private readonly CachedProcessSafetyService _safetyService = new(new ProcessSafetyService());
+    private readonly IProcessTerminationService _terminationService = new ProcessTerminationService();
     private readonly ProcessResourceSampler _sampler = new();
     private readonly SystemResourceMonitor _systemMonitor = new();
     private readonly ProcessCommandLineProvider _commandLineProvider = new();
@@ -68,6 +71,7 @@ public sealed class MainViewModel : ObservableObject, IDisposable
         };
 
         ToggleThemeCommand = new RelayCommand(_ => IsDarkTheme = !IsDarkTheme);
+        KillCommand = new AsyncRelayCommand(_ => ExecuteTerminationAsync());
 
         // 刷新循环：立即执行首轮，之后每秒一轮（在线程池运行）
         _refreshLoop = Task.Run(() => RunRefreshLoopAsync(_cts.Token));
@@ -87,11 +91,158 @@ public sealed class MainViewModel : ObservableObject, IDisposable
             if (SetProperty(ref _selectedRow, value))
             {
                 OnPropertyChanged(nameof(HasSelection));
+                OnPropertyChanged(nameof(KillButtonText));
+                OnPropertyChanged(nameof(KillButtonEnabled));
+                OnPropertyChanged(nameof(KillButtonToolTip));
             }
         }
     }
 
     public bool HasSelection => SelectedRow is not null;
+
+    // ================= 结束应用（Phase 6 终止引擎） =================
+
+    /// <summary>确认对话框（由窗口注入 MessageBox），返回 true 表示用户确认。</summary>
+    public Func<string, string, bool>? Confirm { get; set; }
+
+    /// <summary>信息对话框（由窗口注入 MessageBox）。</summary>
+    public Action<string, string>? Alert { get; set; }
+
+    private bool _isTerminationRunning;
+    public bool IsTerminationRunning
+    {
+        get => _isTerminationRunning;
+        private set
+        {
+            if (SetProperty(ref _isTerminationRunning, value))
+            {
+                OnPropertyChanged(nameof(KillButtonText));
+                OnPropertyChanged(nameof(KillButtonEnabled));
+            }
+        }
+    }
+
+    public AsyncRelayCommand KillCommand { get; }
+
+    /// <summary>结束按钮文案：按 Fresh 之外的最后已知 Safety 状态展示（真正门禁在终止引擎内重新验证）。</summary>
+    public string KillButtonText => IsTerminationRunning
+        ? "正在关闭…"
+        : SelectedRow?.SafetyDecision switch
+        {
+            SafetyDecision.RequiresElevation => "需要管理员权限",
+            SafetyDecision.Blocked => "系统保护，无法结束",
+            SafetyDecision.Indeterminate => "安全状态未知，已阻止操作",
+            _ => "结束应用",
+        };
+
+    public bool KillButtonEnabled
+        => !IsTerminationRunning
+           && SelectedRow is { SafetyDecision: SafetyDecision.Allowed };
+
+    public string KillButtonToolTip => SelectedRow?.SafetyDecision switch
+    {
+        SafetyDecision.RequiresElevation => "需要管理员权限，当前版本不提供提权",
+        SafetyDecision.Blocked => "系统保护，无法结束",
+        SafetyDecision.Indeterminate => "安全状态未知，已阻止操作",
+        SafetyDecision.Allowed => "先尝试正常关闭该应用及其相关进程",
+        _ => string.Empty,
+    };
+
+    /// <summary>
+    /// 结束应用：点击时以当前行成员身份构建不可变 TerminationRequest，
+    /// 引擎内部重新走 Fresh Snapshot / Grouping / Safety / Identity Preflight，
+    /// 绝不使用 UI 行缓存或 StableKey 定位目标。
+    /// </summary>
+    private async Task ExecuteTerminationAsync()
+    {
+        ApplicationRowViewModel? row = SelectedRow;
+        Trace.WriteLine($"[Kill] enter: row={row?.DisplayName ?? "null"} running={IsTerminationRunning} confirm={Confirm != null} decision={row?.SafetyDecision}");
+        if (row is null || IsTerminationRunning || row.SafetyDecision != SafetyDecision.Allowed)
+        {
+            Trace.WriteLine("[Kill] exit: pre-check refused");
+            return;
+        }
+
+        var request = new TerminationRequest(
+            row.DisplayName,
+            row.Processes.Select(p => p.Identity).ToList(),
+            DateTimeOffset.UtcNow);
+        if (!request.IsValid)
+        {
+            Alert?.Invoke("无法安全定位该应用的进程身份，已取消操作。", "结束应用");
+            return;
+        }
+
+        Trace.WriteLine("[Kill] showing confirm dialog");
+        if (Confirm?.Invoke(
+                $"将尝试正常关闭“{row.DisplayName}”及其 {row.ProcessCount} 个相关进程。\n未保存的数据可能丢失。",
+                "确认结束应用") != true)
+        {
+            Trace.WriteLine("[Kill] confirm refused/unavailable");
+            return;
+        }
+
+        Trace.WriteLine("[Kill] confirmed, starting engine");
+
+        IsTerminationRunning = true;
+        try
+        {
+            StatusText = "正在关闭…";
+            ApplicationTerminationResult result = await _terminationService
+                .CloseApplicationGracefullyAsync(request);
+
+            if (result.ResidualCount > 0)
+            {
+                StatusText = $"仍有 {result.ResidualCount} 个相关进程未退出";
+                if (Confirm?.Invoke(
+                        $"“{row.DisplayName}”仍有 {result.ResidualCount} 个相关进程未退出。\n是否强制结束？未保存的数据可能丢失。",
+                        "强制结束") == true)
+                {
+                    if (Confirm?.Invoke(
+                            "强制结束将立即终止相关进程。\n确定强制结束？",
+                            "第二次确认") == true)
+                    {
+                        StatusText = "正在强制结束…";
+                        result = await _terminationService.ForceTerminateApplicationAsync(request);
+                        StatusText = "正在检查残留…";
+                    }
+                }
+                else
+                {
+                    StatusText = "已保留残留进程（未强制结束）。";
+                    return;
+                }
+            }
+
+            StatusText = DescribeTermination(result);
+        }
+        catch (OperationCanceledException)
+        {
+            StatusText = "结束操作已取消。";
+        }
+        catch (Exception ex)
+        {
+            StatusText = $"结束操作失败：{ex.Message}";
+        }
+        finally
+        {
+            IsTerminationRunning = false;
+        }
+    }
+
+    private static string DescribeTermination(ApplicationTerminationResult r) => r.Status switch
+    {
+        TerminationStatus.Success => $"已结束“{r.DisplayName}”（{r.ProcessResults.Count} 个进程）。",
+        TerminationStatus.PartialSuccess => $"部分结束“{r.DisplayName}”：仍有 {r.ResidualCount} 个未退出。",
+        TerminationStatus.AlreadyExited => $"“{r.DisplayName}”的相关进程已全部退出。",
+        TerminationStatus.TargetChanged => "目标已变化（PID 已被复用），已拒绝操作。",
+        TerminationStatus.AmbiguousTarget => "目标无法唯一确定，已取消操作。",
+        TerminationStatus.Blocked => "受系统保护，禁止结束。",
+        TerminationStatus.Indeterminate => "安全状态未知，已阻止操作。",
+        TerminationStatus.RequiresElevation => "需要管理员权限，当前版本不执行。",
+        TerminationStatus.IdentityMismatch => "身份校验失败，已在执行任何终止动作前取消。",
+        _ => $"操作失败：{r.Message ?? "未知原因"}",
+    };
 
     // ================= 工具栏状态 =================
 

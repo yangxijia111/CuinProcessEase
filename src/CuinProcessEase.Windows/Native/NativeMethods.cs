@@ -192,4 +192,38 @@ internal static partial class NativeMethods
 
     [DllImport("kernel32.dll", SetLastError = true)]
     public static extern bool GlobalMemoryStatusEx(ref MEMORYSTATUSEX lpBuffer);
+
+    // ---------- 终止引擎（Phase 6） ----------
+
+    /// <summary>允许终止进程（OpenProcess 访问权）。</summary>
+    public const uint PROCESS_TERMINATE = 0x0001;
+
+    /// <summary>允许 WaitForSingleObject 等待进程对象（OpenProcess 访问权）。</summary>
+    public const uint SYNCHRONIZE = 0x00100000;
+
+    /// <summary>WM_CLOSE 消息（仅向目标进程的顶层窗口投递，禁止广播）。</summary>
+    public const uint WM_CLOSE = 0x0010;
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    public static extern bool TerminateProcess(IntPtr hProcess, uint uExitCode);
+
+    /// <summary>返回值：WAIT_OBJECT_0(0)=signaled；WAIT_TIMEOUT(0x102)=超时；WAIT_FAILED=失败。</summary>
+    [DllImport("kernel32.dll", SetLastError = true)]
+    public static extern uint WaitForSingleObject(IntPtr hHandle, uint dwMilliseconds);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    public static extern bool PostMessageW(IntPtr hWnd, uint Msg, IntPtr wParam, IntPtr lParam);
+
+    [DllImport("user32.dll")]
+    public static extern bool IsWindow(IntPtr hWnd);
+
+    [UnmanagedFunctionPointer(CallingConvention.Winapi)]
+    public delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    public static extern bool EnumWindows(EnumWindowsProc lpEnumFunc, IntPtr lParam);
+
+    /// <summary>读取窗口所属进程 ID（线程 ID 经 out 参数返回，调用方不需要时忽略）。</summary>
+    [DllImport("user32.dll")]
+    public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint lpdwProcessId);
 }

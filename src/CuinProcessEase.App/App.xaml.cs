@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.IO;
 using System.Windows;
 
@@ -22,6 +23,10 @@ public partial class App : Application
         {
             // 无旧日志或清理失败都不影响启动
         }
+
+        // 终止操作执行链 trace（诊断用）
+        Trace.Listeners.Add(new TextWriterTraceListener(DispatcherLogPath + ".trace"));
+        Trace.AutoFlush = true;
 
         base.OnStartup(e);
     }

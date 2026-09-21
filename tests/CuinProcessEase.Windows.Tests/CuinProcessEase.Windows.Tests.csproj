@@ -17,6 +17,8 @@
   <ItemGroup>
     <ProjectReference Include="..\..\src\CuinProcessEase.Core\CuinProcessEase.Core.csproj" />
     <ProjectReference Include="..\..\src\CuinProcessEase.Windows\CuinProcessEase.Windows.csproj" />
+    <!-- 终止引擎测试目标：测试自行启动并结束，绝不触碰系统/用户进程 -->
+    <ProjectReference Include="..\CuinProcessEase.TerminationTestApp\CuinProcessEase.TerminationTestApp.csproj" />
   </ItemGroup>
 
 </Project>

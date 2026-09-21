@@ -27,6 +27,13 @@ public partial class MainWindow : Window
         PauseCheck.Checked += (_, _) => _viewModel.PauseRefresh = true;
         PauseCheck.Unchecked += (_, _) => _viewModel.PauseRefresh = false;
 
+        // 终止操作确认对话框（引擎的安全门禁在 ViewModel/Engine 内，不在此处）
+        _viewModel.Confirm = (message, title) =>
+            MessageBox.Show(this, message, title, MessageBoxButton.YesNo, MessageBoxImage.Warning)
+            == MessageBoxResult.Yes;
+        _viewModel.Alert = (message, title) =>
+            MessageBox.Show(this, message, title, MessageBoxButton.OK, MessageBoxImage.Information);
+
         Closed += (_, _) => _viewModel.Dispose();
     }
 

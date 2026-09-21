@@ -384,12 +384,13 @@
                                        FontWeight="Bold"
                                        Foreground="{DynamicResource Brush.Text.Primary}"
                                        TextWrapping="Wrap" />
-                            <!-- 布局预留：Phase 5 只判断不执行，永久禁用 -->
+                            <!-- Phase 6：终止引擎接入；按 Safety 状态启停，引擎内部仍会重新全面验证 -->
                             <Button Grid.Column="1"
                                     Style="{DynamicResource ToolButton}"
-                                    Content="结束应用"
-                                    IsEnabled="False"
-                                    ToolTip="Phase 5 仅做判断与展示，不提供结束进程能力"
+                                    Content="{Binding KillButtonText}"
+                                    IsEnabled="{Binding KillButtonEnabled}"
+                                    Command="{Binding KillCommand}"
+                                    ToolTip="{Binding KillButtonToolTip}"
                                     VerticalAlignment="Top" />
                         </Grid>
 

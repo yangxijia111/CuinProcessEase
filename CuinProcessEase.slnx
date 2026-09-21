@@ -6,6 +6,7 @@
   </Folder>
   <Folder Name="/tests/">
     <Project Path="tests/CuinProcessEase.Core.Tests/CuinProcessEase.Core.Tests.csproj" />
+    <Project Path="tests/CuinProcessEase.TerminationTestApp/CuinProcessEase.TerminationTestApp.csproj" />
     <Project Path="tests/CuinProcessEase.Windows.Tests/CuinProcessEase.Windows.Tests.csproj" />
   </Folder>
 </Solution>
