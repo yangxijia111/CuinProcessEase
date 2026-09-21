@@ -10,7 +10,8 @@ namespace CuinProcessEase.Windows.Tests;
 /// <summary>
 /// 终止引擎集成测试：只结束测试自己启动的 TerminationTestApp 实例，
 /// 绝不结束系统进程或用户现有程序。
-/// 覆盖：优雅 WM_CLOSE / IgnoreClose 残留 / Force / 父子同组 / 旧 Request 不杀新实例 / 已退出安全处理。
+/// 覆盖：优雅 WM_CLOSE / IgnoreClose 残留 / Force / 父子同组 / 单进程 Force 不伤同组 /
+/// 旧 Request 不杀新实例 / 差 1 FILETIME tick 的请求拒绝 / 已退出安全处理。
 /// </summary>
 public sealed class ProcessTerminationServiceTests
 {
@@ -112,6 +113,32 @@ public sealed class ProcessTerminationServiceTests
         catch
         {
             // 清理失败忽略（进程可能已退出）
+        }
+    }
+
+    /// <summary>
+    /// 按 PID 显式清理：父进程已被终止引擎结束（HasExited=true）时，
+    /// KillQuietly(proc) 会跳过整树杀，child 必须单独清理，
+    /// 否则泄漏的同 exe 实例会被后续测试的 Fresh 分组聚进候选组。
+    /// </summary>
+    private static void KillPidQuietly(int pid)
+    {
+        try
+        {
+            using var p = Process.GetProcessById(pid);
+            if (!p.HasExited)
+            {
+                p.Kill(entireProcessTree: true);
+                p.WaitForExit(3000);
+            }
+        }
+        catch (ArgumentException)
+        {
+            // 进程已退出
+        }
+        catch
+        {
+            // 其他清理失败忽略
         }
     }
 
@@ -312,18 +339,53 @@ public sealed class ProcessTerminationServiceTests
     }
 
     [Fact]
-    public async Task 终止_单进程Force_与组终止同一Fresh管线()
+    public async Task 终止_单进程Force_仅终止目标进程_同组其他成员保持存活()
     {
-        var (proc, pid) = StartTarget("CuinT-SingleForce");
+        // 父子同 exe 路径属于同一 ApplicationGroup（组模式会一并终止）；
+        // 单进程模式只允许终止请求中的 exact identity，绝不能因同组身份扩展候选
+        var (proc, parentPid, childPid) = StartParentWithChild("CuinT-SingleForce", "CuinT-SingleForce-Child");
         try
         {
-            var request = BuildRequest("TerminationTestApp", pid);
+            var request = BuildRequest("TerminationTestApp", parentPid);
 
             var result = await Service.ForceTerminateProcessAsync(request);
 
             Assert.Equal(TerminationStatus.Success, result.Status);
-            Assert.Equal(ProcessTerminationStatus.Terminated, Assert.Single(result.ProcessResults).Result);
-            Assert.True(proc.WaitForExit(5000));
+            var pr = Assert.Single(result.ProcessResults);
+            Assert.Equal(parentPid, pr.Pid);
+            Assert.Equal(ProcessTerminationStatus.Terminated, pr.Result);
+            Assert.True(proc.WaitForExit(5000), "父进程（目标本身）必须退出");
+            Assert.True(IsAlive(childPid), "同组 child 绝不能被单进程终止波及");
+        }
+        finally
+        {
+            KillQuietly(proc);
+            KillPidQuietly(childPid); // 父进程已被引擎终止，child 须显式清理防止泄漏
+        }
+    }
+
+    [Fact]
+    public async Task 终止_关键安全_差1个FILETIMEtick的请求_绝不结束目标()
+    {
+        // 验证“1 秒容差”已彻底不存在：期望创建时间与实际仅差 1 tick（100ns），
+        // 组模式与单进程模式都必须拒绝执行任何终止动作
+        var (proc, pid) = StartTarget("CuinT-OneTick");
+        try
+        {
+            var exact = GetIdentity(pid);
+            Assert.NotNull(exact.StartTimeUtc);
+            var tampered = new ProcessIdentity(pid, exact.StartTimeUtc.Value.AddTicks(1));
+            var request = new TerminationRequest("TerminationTestApp", [tampered], DateTimeOffset.UtcNow);
+
+            var byGroup = await Service.ForceTerminateApplicationAsync(request);
+            Assert.True(byGroup.Status is TerminationStatus.TargetChanged or TerminationStatus.AlreadyExited,
+                $"差 1 tick 的请求必须被拒绝，实际 {byGroup.Status}");
+            Assert.True(IsAlive(pid), "差 1 tick 的组模式请求绝不能结束目标");
+
+            var bySingle = await Service.ForceTerminateProcessAsync(request);
+            Assert.True(bySingle.Status is TerminationStatus.TargetChanged or TerminationStatus.AlreadyExited,
+                $"差 1 tick 的单进程请求必须被拒绝，实际 {bySingle.Status}");
+            Assert.True(IsAlive(pid), "差 1 tick 的单进程请求绝不能结束目标");
         }
         finally
         {

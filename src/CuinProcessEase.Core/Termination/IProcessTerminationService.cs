@@ -9,8 +9,10 @@ namespace CuinProcessEase.Core.Termination;
 /// 实现必须：
 /// 1. 执行前重新获取 Fresh Snapshot / Fresh Grouping / Fresh Safety（禁止 GUI Safety 缓存）；
 /// 2. 仅以 ProcessIdentity（PID + StartTimeUtc）完全匹配定位目标，绝不使用 StableKey；
-/// 3. 全部候选先完成 Identity Preflight，再执行任何终止动作；
-/// 4. Graceful 绝不自动升级为 TerminateProcess。
+/// 3. 严格两阶段 Preflight：全部候选用真实句柄以 CreationTime 原始 FILETIME 逐位比对
+///    （无任何时间容差），全部通过前绝不执行任何终止动作；任一候选失败即整组取消；
+/// 4. Graceful 绝不自动升级为 TerminateProcess；
+/// 5. Force 最终必须 Final Fresh Rescan 验证全部 exact identity（只验证，不扩大范围）。
 /// </remarks>
 public interface IProcessTerminationService
 {
@@ -29,8 +31,10 @@ public interface IProcessTerminationService
         TerminationRequest request, CancellationToken cancellationToken = default);
 
     /// <summary>
-    /// 强制终止单个进程：与组终止走完全相同的 Fresh Snapshot / Fresh Safety / Identity 校验管线，
-    /// 仅预期身份为单个进程。同样 fail-closed。
+    /// 强制终止单个进程：Fresh Snapshot → exact ProcessIdentity 定位 → Fresh Safety（仅该进程）→
+    /// HANDLE Preflight → exact CreationTime（无任何容差）→ TerminateProcess → 有限等待 → Fresh Rescan。
+    /// <see cref="TerminationRequest.ExpectedMemberIdentities"/> 必须恰好包含一个身份；
+    /// 绝不因目标属于某个应用组而把组内其他成员纳入候选。同样 fail-closed。
     /// </summary>
     Task<ApplicationTerminationResult> ForceTerminateProcessAsync(
         TerminationRequest request, CancellationToken cancellationToken = default);
