@@ -17,12 +17,16 @@ namespace CuinProcessEase.Windows.Termination;
 /// - 严格两阶段事务式 Preflight：全部候选先打开真实 HANDLE 并以 CreationTime 原始 FILETIME
 ///   逐位比对（绝无任何时间容差，差 1 tick 也拒绝），全部得到 Validated / AlreadyExited 之后
 ///   才允许第一个破坏性动作；任一仍存活候选 OpenProcess / GetProcessTimes / 身份比对失败
-///   → 整组取消（0 WM_CLOSE、0 TerminateProcess）；
+///   → 整组取消（0 WM_CLOSE、0 TerminateProcess），且每个失败候选都留下结构化结果
+///   （UnreliableIdentity / AccessDenied / IdentityMismatch / Failed，P6.2）；
 /// - Force 直接复用 Preflight 验证过的 HANDLE，绝不按 PID 重新打开；
 /// - Graceful 仅向目标进程顶层窗口投递 WM_CLOSE（禁止广播），有限等待，绝不自动升级强杀；
 /// - 单进程 Force 只重新定位这一个 exact identity，绝不因同组身份扩展候选；
+/// - 残留清理轮的 Preflight 诊断无条件并入 attempts（P6.2），取消路径也不丢失任何 identity 的记录；
 /// - Force 最终始终执行 Final Fresh Rescan：仅验证本次所有曾纳入候选的 exact ProcessIdentity
-///   是否仍存在（只验证，绝不扩大终止范围），结果经 TerminationResultReconciler 归并；
+///   （只验证，绝不扩大终止范围），逐身份四态判定 Gone / Surviving / PidReused / Uncertain；
+///   PID 存在但身份读不到 → fail-closed 视为残留（P6.2），绝不虚报成功；
+///   结果经 TerminationResultReconciler 归并，最终 ProcessResults 覆盖全部 targeted identities；
 /// - 所有 HANDLE 最终 CloseHandle。
 /// </remarks>
 public sealed class ProcessTerminationService : IProcessTerminationService
@@ -185,6 +189,10 @@ public sealed class ProcessTerminationService : IProcessTerminationService
                     messages.Add($"残留清理第 {pass} 轮：发现 {subPlan.Candidates.Count} 个残留/新增成员。");
                     targetedIdentities.UnionWith(subPlan.Candidates.Select(p => p.Identity));
                     PreflightOutcome passPreflight = Preflight(subPlan.Candidates, TerminationMode.Force, allHandles, cancellationToken);
+                    // P6.2：本轮 Preflight 产生的全部诊断（AlreadyExited / AccessDenied /
+                    // IdentityMismatch / UnreliableIdentity / Failed）无条件进入 attempts，
+                    // 绝不在取消路径丢失（否则 Final Rescan 将无法为这些 identity 归并出结果）
+                    attempts.AddRange(passPreflight.Results);
                     if (passPreflight.CancelStatus is { } passCancel)
                     {
                         messages.Add($"残留清理第 {pass} 轮身份校验失败，已停止自动清理：{passPreflight.CancelMessage}");
@@ -203,12 +211,15 @@ public sealed class ProcessTerminationService : IProcessTerminationService
             // ---- Phase 6：Final exact-identity rescan（Force 专属；只验证，绝不终止） ----
             if (mode == TerminationMode.Force)
             {
-                IReadOnlySet<ProcessIdentity> survivorsAfterFinal =
-                    await FindSurvivingIdentitiesAsync(targetedIdentities, cancellationToken).ConfigureAwait(false);
-                finalResults = TerminationResultReconciler.ApplyFinalRescan(latest, survivorsAfterFinal);
-                messages.Add(survivorsAfterFinal.Count == 0
+                IReadOnlyList<FinalIdentityVerification> verifications = await VerifyFinalIdentityStatesAsync(
+                    targetedIdentities, cancellationToken).ConfigureAwait(false);
+                // P6.2：归并覆盖全部 targeted identities——没有历史 attempt 的身份也必须出现在最终结果中
+                finalResults = TerminationResultReconciler.ApplyFinalRescan(targetedIdentities, latest, verifications);
+                int unresolvedCount = verifications.Count(v =>
+                    v.State is FinalIdentityState.Surviving or FinalIdentityState.Uncertain);
+                messages.Add(unresolvedCount == 0
                     ? "所有已确认目标身份均已退出。"
-                    : $"Final Rescan 确认仍有 {survivorsAfterFinal.Count} 个目标身份存在。");
+                    : $"Final Rescan 确认仍有 {unresolvedCount} 个目标身份存在或无法确认退出。");
             }
 
             // ---- Phase 7：汇总（存活的预期身份即残留） ----
@@ -348,14 +359,13 @@ public sealed class ProcessTerminationService : IProcessTerminationService
             attempts.AddRange(ExecuteForce(preflight.Validated));
 
             // ---- Final Fresh Rescan：仅验证该 exact identity；发现残留绝不自动扩大杀伤范围 ----
-            IReadOnlySet<ProcessIdentity> survivors = await FindSurvivingIdentitiesAsync(
+            IReadOnlyList<FinalIdentityVerification> verifications = await VerifyFinalIdentityStatesAsync(
                 [target], cancellationToken).ConfigureAwait(false);
-            IReadOnlyList<ProcessTerminationResult> finalResults =
-                TerminationResultReconciler.ApplyFinalRescan(
-                    TerminationResultReconciler.LatestResultByIdentity(attempts), survivors);
-            messages.Add(survivors.Count == 0
+            IReadOnlyList<ProcessTerminationResult> finalResults = TerminationResultReconciler.ApplyFinalRescan(
+                [target], TerminationResultReconciler.LatestResultByIdentity(attempts), verifications);
+            messages.Add(verifications.All(v => v.State is FinalIdentityState.Gone or FinalIdentityState.PidReused)
                 ? "所有已确认目标身份均已退出。"
-                : "Final Rescan 确认目标身份仍存在。");
+                : "Final Rescan 确认目标身份仍存在或无法确认退出。");
 
             (TerminationStatus status, TerminationFailureReason reason) =
                 TerminationResultReconciler.Summarize(finalResults);
@@ -388,16 +398,60 @@ public sealed class ProcessTerminationService : IProcessTerminationService
     }
 
     /// <summary>
-    /// Final Fresh Rescan：重新拍摄快照，返回 targeted 集合中仍存在的 exact ProcessIdentity。
-    /// 只验证，绝不基于 exe/path/product/stableKey 自动扩大终止范围。
+    /// Final Fresh Rescan（P6.2 四态模型）：重新拍摄快照，对每个 targeted identity 逐一判定
+    /// Gone / Surviving / PidReused / Uncertain（<see cref="FinalIdentityState"/>），只验证绝不终止。
+    /// PID 存在但快照 StartTime 不可读时，用 PROCESS_QUERY_LIMITED_INFORMATION 句柄重新
+    /// GetProcessTimes 以 <see cref="ProcessIdentityMatcher"/> 精确比对（仅查询）；
+    /// 查询失败 → Uncertain（fail-closed），绝不视为 Gone。
     /// </summary>
-    private async Task<IReadOnlySet<ProcessIdentity>> FindSurvivingIdentitiesAsync(
+    private async Task<IReadOnlyList<FinalIdentityVerification>> VerifyFinalIdentityStatesAsync(
         IReadOnlyCollection<ProcessIdentity> targeted, CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
         ProcessSnapshotCollection snapshot = await _snapshotService.CaptureAsync(cancellationToken).ConfigureAwait(false);
-        var present = new HashSet<ProcessIdentity>(snapshot.Processes.Select(p => p.Identity));
-        return new HashSet<ProcessIdentity>(targeted.Where(present.Contains));
+        Dictionary<int, ProcessSnapshot> byPid = snapshot.Processes
+            .GroupBy(p => p.ProcessId)
+            .ToDictionary(g => g.Key, g => g.First());
+
+        var verifications = new List<FinalIdentityVerification>(targeted.Count);
+        foreach (ProcessIdentity identity in targeted)
+        {
+            byPid.TryGetValue(identity.ProcessId, out ProcessSnapshot? entry);
+
+            // 仅当快照条目存在但 StartTime 读不到时才做句柄级复核（其余情形四态判定不需要句柄）
+            long? handleCreationFileTime = entry is not null && entry.StartTimeUtc is null
+                ? TryQueryCreationFileTime(identity.ProcessId)
+                : null;
+
+            verifications.Add(new FinalIdentityVerification(
+                identity,
+                FinalIdentityVerifier.Determine(identity, entry, handleCreationFileTime)));
+        }
+
+        return verifications;
+    }
+
+    /// <summary>
+    /// 仅查询用途的创建时间复核：OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION) + GetProcessTimes。
+    /// 绝不带 TERMINATE 权限，绝不执行任何终止动作；句柄立即释放；失败（含打开被拒绝）返回 null。
+    /// </summary>
+    private long? TryQueryCreationFileTime(int processId)
+    {
+        IntPtr handle = _interop.OpenProcess(
+            NativeMethods.PROCESS_QUERY_LIMITED_INFORMATION, inheritHandle: false, (uint)processId, out _);
+        if (handle == IntPtr.Zero)
+        {
+            return null;
+        }
+
+        try
+        {
+            return _interop.TryGetCreationFileTime(handle, out long creationFileTime) ? creationFileTime : null;
+        }
+        finally
+        {
+            _interop.CloseHandle(handle);
+        }
     }
 
     // ================= Identity Preflight =================
@@ -442,6 +496,15 @@ public sealed class ProcessTerminationService : IProcessTerminationService
             // fail-closed：Snapshot StartTime 缺失 → 无法校验身份 → 取消整个操作
             if (candidate.StartTimeUtc is null)
             {
+                // P6.2：导致 Preflight fail-all 的候选必须留下结构化结果（不用 Message 代替状态）
+                outcome.Results.Add(new ProcessTerminationResult
+                {
+                    Pid = candidate.ProcessId,
+                    ExpectedIdentity = candidate.Identity,
+                    ProcessName = candidate.Name,
+                    Result = ProcessTerminationStatus.UnreliableIdentity,
+                    Message = "缺少启动时间，无法安全校验身份。",
+                });
                 outcome.CancelStatus = TerminationStatus.Failed;
                 outcome.CancelReason = TerminationFailureReason.UnreliableIdentity;
                 outcome.CancelMessage = $"进程 {candidate.Name}（PID {candidate.ProcessId}）缺少启动时间，无法安全校验身份，已取消操作。";
@@ -477,6 +540,15 @@ public sealed class ProcessTerminationService : IProcessTerminationService
 
             if (!_interop.TryGetCreationFileTime(handle, out long actualCreationFileTime))
             {
+                // P6.2：GetProcessTimes 失败同样必须留下该 identity 的结构化结果
+                outcome.Results.Add(new ProcessTerminationResult
+                {
+                    Pid = candidate.ProcessId,
+                    ExpectedIdentity = candidate.Identity,
+                    ProcessName = candidate.Name,
+                    Result = ProcessTerminationStatus.UnreliableIdentity,
+                    Message = "无法读取进程创建时间，无法校验身份。",
+                });
                 outcome.CancelStatus = TerminationStatus.Failed;
                 outcome.CancelReason = TerminationFailureReason.UnreliableIdentity;
                 outcome.CancelMessage = $"进程 {candidate.Name}（PID {candidate.ProcessId}）无法读取创建时间，无法校验身份，已取消操作。";

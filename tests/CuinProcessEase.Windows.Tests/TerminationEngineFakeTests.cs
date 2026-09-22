@@ -60,6 +60,33 @@ public sealed class TerminationEngineFakeTests
         /// </summary>
         public int ExitRendersRemaining { get; set; }
 
+        /// <summary>
+        /// 经过 N 次 Capture 后自行退出（模拟挂死进程在清理轮间被外部结束/自行退出）：
+        /// 每次 Capture 递减，减到 0 时置 <see cref="Exited"/> 且当轮起从快照消失。
+        /// </summary>
+        public int SelfExitAfterCaptures { get; set; }
+
+        /// <summary>
+        /// 经过 N 次 Capture 后才出现在快照中（模拟清理轮浮现的 helper / PID 复用者）：
+        /// 计数耗尽前每次 Capture 递减且当轮跳过。
+        /// </summary>
+        public int AppearAfterCaptures { get; set; }
+
+        /// <summary>快照中的 StartTime 置为 null（模拟权限不足读不到；不影响句柄视角）。</summary>
+        public bool SnapshotStartTimeNull { get; set; }
+
+        /// <summary>
+        /// PID 复用模拟：进程退出后的下一次 Capture 以该创建时间“复活”为新实例
+        /// （新身份与原 identity 无关，用于 Final Rescan 的 PidReused / Uncertain 场景）。
+        /// </summary>
+        public long? ResurrectFileTimeUtc { get; set; }
+
+        /// <summary>复活后的新实例：快照 StartTime 读不到（仅复活后生效，不影响原实例）。</summary>
+        public bool ResurrectSnapshotStartTimeNull { get; set; }
+
+        /// <summary>复活后的新实例：句柄 GetProcessTimes 失败（仅复活后生效）。</summary>
+        public bool ResurrectTimesFails { get; set; }
+
         public int WindowCount { get; set; } = 1;
     }
 
@@ -172,26 +199,60 @@ public sealed class TerminationEngineFakeTests
 
         public Task<ProcessSnapshotCollection> CaptureAsync(CancellationToken cancellationToken = default)
         {
-            var snapshots = Interop.Processes
-                .Where(kv => !kv.Value.Exited || kv.Value.ExitRendersRemaining > 0)
-                .Select(kv =>
+            var snapshots = new List<ProcessSnapshot>();
+            foreach (KeyValuePair<uint, FakeProcess> kv in Interop.Processes)
+            {
+                FakeProcess process = kv.Value;
+
+                // PID 复用：旧实例退出后的下一次 Capture 以新创建时间复活为新实例
+                if (process.Exited && process.ResurrectFileTimeUtc is { } reusedFileTime)
                 {
-                    if (kv.Value.Exited && kv.Value.ExitRendersRemaining > 0)
+                    process.CreationFileTimeUtc = reusedFileTime;
+                    process.ResurrectFileTimeUtc = null;
+                    process.Exited = false;
+                    process.SnapshotStartTimeNull = process.ResurrectSnapshotStartTimeNull;
+                    process.TimesFails = process.ResurrectTimesFails;
+                }
+
+                // 自行退出：计数耗尽当轮起从快照消失
+                if (!process.Exited && process.SelfExitAfterCaptures > 0)
+                {
+                    process.SelfExitAfterCaptures--;
+                    if (process.SelfExitAfterCaptures == 0)
                     {
-                        kv.Value.ExitRendersRemaining--;
+                        process.Exited = true;
+                    }
+                }
+
+                // 延迟浮现：计数耗尽前不出现在快照
+                if (process.AppearAfterCaptures > 0)
+                {
+                    process.AppearAfterCaptures--;
+                    continue;
+                }
+
+                bool exitedStillRenders = process.Exited && process.ExitRendersRemaining > 0;
+                if (!process.Exited || exitedStillRenders)
+                {
+                    if (exitedStillRenders)
+                    {
+                        process.ExitRendersRemaining--;
                     }
 
-                    return new ProcessSnapshot
+                    snapshots.Add(new ProcessSnapshot
                     {
                         Identity = new ProcessIdentity(
-                            (int)kv.Key, DateTime.FromFileTimeUtc(kv.Value.CreationFileTimeUtc)),
-                        ParentProcessId = kv.Value.ParentPid,
-                        Name = kv.Value.Name,
-                        ExecutablePath = kv.Value.ExecutablePath,
+                            (int)kv.Key,
+                            process.SnapshotStartTimeNull
+                                ? null
+                                : DateTime.FromFileTimeUtc(process.CreationFileTimeUtc)),
+                        ParentProcessId = process.ParentPid,
+                        Name = process.Name,
+                        ExecutablePath = process.ExecutablePath,
                         SessionId = 1,
-                    };
-                })
-                .ToList();
+                    });
+                }
+            }
 
             return Task.FromResult(new ProcessSnapshotCollection
             {
@@ -432,5 +493,161 @@ public sealed class TerminationEngineFakeTests
         Assert.Equal(TerminationStatus.IdentityMismatch, result.Status);
         Assert.Empty(interop.DestructiveCalls);
         Assert.False(target.Exited);
+    }
+
+    // ================= P6.2：Final Reconciliation Hardening =================
+
+    [Fact]
+    public async Task P62_Preflight失败候选留下结构化UnreliableIdentity结果()
+    {
+        (FakeTerminationInterop interop, ProcessTerminationService service) = CreateService();
+        FakeProcess target = AddProcess(interop, 100, BaseFileTime);
+        target.TimesFails = true;
+
+        ApplicationTerminationResult result = await service.ForceTerminateApplicationAsync(
+            GroupRequest(IdentityOf(100, BaseFileTime)));
+
+        Assert.Equal(TerminationStatus.Failed, result.Status);
+        Assert.Equal(TerminationFailureReason.UnreliableIdentity, result.FailureReason);
+        Assert.Empty(interop.DestructiveCalls);
+        // 不用 Message 代替结构化状态：失败候选必须留下 ProcessTerminationResult
+        Assert.Contains(result.ProcessResults, r => r.Pid == 100
+            && r.Result == ProcessTerminationStatus.UnreliableIdentity);
+    }
+
+    [Fact]
+    public async Task P62_CaseA_残留轮新增helper的Preflight失败_不虚报Success且helper计入Residual()
+    {
+        (FakeTerminationInterop interop, ProcessTerminationService service) = CreateService();
+
+        // A：第 0 轮 TerminateProcess 成功但有限等待超时（TimedOut 挂死），Final Rescan 前自行退出
+        FakeProcess a = AddProcess(interop, 100, BaseFileTime);
+        a.ExitsOnTerminate = false;
+        a.SelfExitAfterCaptures = 3; // #1 计划快照、#2 残留轮快照中仍出现；#3（Final）时已消失
+
+        // B：残留轮浮现的新 helper，GetProcessTimes 失败 → 残留轮 Preflight 整组取消
+        FakeProcess b = AddProcess(interop, 200, BaseFileTime + 1_000, parentPid: 100);
+        b.TimesFails = true;
+        b.AppearAfterCaptures = 1; // #1 不出现，#2 残留轮浮现
+
+        ApplicationTerminationResult result = await service.ForceTerminateApplicationAsync(
+            GroupRequest(IdentityOf(100, BaseFileTime)));
+
+        // B 仍存活且身份读不到：绝不能虚报 Success / ResidualCount = 0
+        Assert.NotEqual(TerminationStatus.Success, result.Status);
+        Assert.Equal(1, result.ResidualCount);
+        Assert.False(b.Exited);
+        Assert.Equal(1, interop.TerminateCount); // 仅第 0 轮对 A 执行过 TerminateProcess
+        // B：Preflight 的 UnreliableIdentity 诊断保留 + Final Rescan fail-closed → Residual
+        Assert.Contains(result.ProcessResults, r => r.Pid == 200
+            && r.Result == ProcessTerminationStatus.Residual);
+        // A：TimedOut + Final 确认 Gone → Terminated
+        Assert.Contains(result.ProcessResults, r => r.Pid == 100
+            && r.Result == ProcessTerminationStatus.Terminated);
+    }
+
+    [Fact]
+    public async Task P62_CaseB_残留轮Preflight的AlreadyExited记录保留为最终状态()
+    {
+        (FakeTerminationInterop interop, ProcessTerminationService service) = CreateService();
+
+        // A：第 0 轮 TimedOut（TerminateProcess 成功但挂死不退）；残留轮快照仍渲染它（竞态），
+        // 但 Preflight 打开句柄时进程对象已 signaled → 记 AlreadyExited
+        FakeProcess a = AddProcess(interop, 100, BaseFileTime);
+        a.ExitsOnTerminate = false;
+        a.SelfExitAfterCaptures = 2;
+        a.ExitRendersRemaining = 1;
+        // B：残留轮浮现的新 helper，正常被终止
+        FakeProcess b = AddProcess(interop, 200, BaseFileTime + 1_000, parentPid: 100);
+        b.AppearAfterCaptures = 1;
+
+        ApplicationTerminationResult result = await service.ForceTerminateApplicationAsync(
+            GroupRequest(IdentityOf(100, BaseFileTime)));
+
+        Assert.Equal(TerminationStatus.Success, result.Status);
+        Assert.Equal(0, result.ResidualCount);
+        // A 的最终状态是残留轮 Preflight 记录的 AlreadyExited（而非 TimedOut 被 Final 修正的
+        // Terminated），证明 passPreflight.Results 已无条件进入最终归并
+        Assert.Contains(result.ProcessResults, r => r.Pid == 100
+            && r.Result == ProcessTerminationStatus.AlreadyExited);
+        Assert.Contains(result.ProcessResults, r => r.Pid == 200
+            && r.Result == ProcessTerminationStatus.Terminated);
+    }
+
+    [Fact]
+    public async Task P62_CaseC_Final快照PID存在但身份读不到_failClosed计入Residual()
+    {
+        (FakeTerminationInterop interop, ProcessTerminationService service) = CreateService();
+
+        // A：第 0 轮正常终止（TerminateProcess 并确认退出）；随后同 PID 被“复用者”接管，
+        // 复用者的快照 StartTime 与句柄创建时间均读不到（权限受限视角）
+        FakeProcess a = AddProcess(interop, 100, BaseFileTime);
+        a.ResurrectFileTimeUtc = BaseFileTime + 5_000_000;
+        a.ResurrectSnapshotStartTimeNull = true;
+        a.ResurrectTimesFails = true;
+
+        ApplicationTerminationResult result = await service.ForceTerminateApplicationAsync(
+            GroupRequest(IdentityOf(100, BaseFileTime)));
+
+        // PID 100 存在但身份无法读取（StartTime == null 且句柄复核失败）：
+        // 绝不能视为 Gone → fail-closed Residual，绝不虚报 Success
+        Assert.NotEqual(TerminationStatus.Success, result.Status);
+        Assert.Equal(1, result.ResidualCount);
+        Assert.Equal(ProcessTerminationStatus.Residual, Assert.Single(result.ProcessResults).Result);
+        // Final Rescan 只验证：绝不终止读不到身份的 PID 占用者
+        Assert.False(a.Exited);
+        Assert.Equal(1, interop.TerminateCount);
+    }
+
+    [Fact]
+    public async Task P62_CaseD_Final快照PID被复用_原identity视为已退出且绝不伤及新实例()
+    {
+        (FakeTerminationInterop interop, ProcessTerminationService service) = CreateService();
+
+        // A（PID 100 + T1）：正常终止；随后同 PID 被 T2 的新实例复用（StartTime 可读）
+        FakeProcess a = AddProcess(interop, 100, BaseFileTime);
+        a.ResurrectFileTimeUtc = BaseFileTime + 5_000_000;
+
+        ApplicationTerminationResult result = await service.ForceTerminateApplicationAsync(
+            GroupRequest(IdentityOf(100, BaseFileTime)));
+
+        // PID 100 + T2 ≠ 原身份（PID 100 + T1）：原 identity 已退出，本次操作本身是成功的
+        Assert.Equal(TerminationStatus.Success, result.Status);
+        Assert.Equal(0, result.ResidualCount);
+        Assert.Equal(ProcessTerminationStatus.Terminated, Assert.Single(result.ProcessResults).Result);
+        // 绝不把 T2 当 residual 处理，也绝不终止 T2
+        Assert.False(a.Exited);
+        Assert.Equal(1, interop.TerminateCount);
+    }
+
+    [Fact]
+    public async Task P62_CaseE_从未产生attempt的targeted身份_最终仍出现在ProcessResults()
+    {
+        (FakeTerminationInterop interop, ProcessTerminationService service) = CreateService();
+
+        // A：第 0 轮 TimedOut（挂死）
+        FakeProcess a = AddProcess(interop, 100, BaseFileTime);
+        a.ExitsOnTerminate = false;
+        // C：残留轮浮现的新 root（PID 最小 → Preflight 排最前），GetProcessTimes 失败
+        FakeProcess c = AddProcess(interop, 50, BaseFileTime + 2_000);
+        c.TimesFails = true;
+        c.AppearAfterCaptures = 1;
+        // D：残留轮浮现的另一个新 root，排在失败的 C 之后 → Preflight 提前取消，从未被处理（无任何 attempt）
+        FakeProcess d = AddProcess(interop, 60, BaseFileTime + 3_000);
+        d.AppearAfterCaptures = 1;
+
+        ApplicationTerminationResult result = await service.ForceTerminateApplicationAsync(
+            GroupRequest(IdentityOf(100, BaseFileTime)));
+
+        // 三个 targeted identity（A / C / D）全部出现在最终 ProcessResults，D 不被 Reconciler 静默遗漏
+        Assert.Equal(3, result.ProcessResults.Count);
+        Assert.Equal(3, result.ProcessResults.Select(r => r.Pid).Distinct().Count());
+        // D：无历史 attempt + Final 仍存活 → 必须生成 Residual（绝不 Success / ResidualCount = 0）
+        Assert.Contains(result.ProcessResults, r => r.Pid == 60
+            && r.Result == ProcessTerminationStatus.Residual);
+        Assert.Equal(3, result.ResidualCount);
+        Assert.NotEqual(TerminationStatus.Success, result.Status);
+        Assert.Equal(1, interop.TerminateCount); // 仅第 0 轮 A；C 失败整组取消后 A/D 未再执行
+        Assert.False(d.Exited);
     }
 }

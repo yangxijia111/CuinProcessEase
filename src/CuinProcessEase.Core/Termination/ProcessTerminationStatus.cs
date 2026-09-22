@@ -32,4 +32,7 @@ public enum ProcessTerminationStatus
 
     /// <summary>残留（优雅模式未响应 / 清理轮次后仍存活）。</summary>
     Residual = 9,
+
+    /// <summary>身份不可靠（StartTime 缺失 / 句柄创建时间读取失败，无法安全校验），已整组取消。</summary>
+    UnreliableIdentity = 10,
 }

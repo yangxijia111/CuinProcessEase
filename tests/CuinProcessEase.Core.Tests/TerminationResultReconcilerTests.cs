@@ -62,10 +62,11 @@ public sealed class TerminationResultReconcilerTests
         Assert.Contains(latest, r => r.ExpectedIdentity == b && r.Result == ProcessTerminationStatus.AccessDenied);
     }
 
-    // ================= ApplyFinalRescan =================
+    // ================= ApplyFinalRescan（P6.2：targeted 全覆盖 + 四态归并） =================
 
-    private static IReadOnlySet<ProcessIdentity> SetOf(params ProcessIdentity[] identities)
-        => new HashSet<ProcessIdentity>(identities);
+    private static IReadOnlyList<FinalIdentityVerification> Verifications(
+        params (ProcessIdentity Identity, FinalIdentityState State)[] items)
+        => items.Select(i => new FinalIdentityVerification(i.Identity, i.State)).ToList();
 
     [Fact]
     public void 归并_Terminated且FinalRescan已消失_保持Terminated()
@@ -73,7 +74,8 @@ public sealed class TerminationResultReconcilerTests
         var identity = Id(100);
 
         IReadOnlyList<ProcessTerminationResult> final = TerminationResultReconciler.ApplyFinalRescan(
-            [Attempt(identity, ProcessTerminationStatus.Terminated)], SetOf());
+            [identity], [Attempt(identity, ProcessTerminationStatus.Terminated)],
+            Verifications((identity, FinalIdentityState.Gone)));
 
         var result = Assert.Single(final);
         Assert.Equal(ProcessTerminationStatus.Terminated, result.Result);
@@ -86,7 +88,8 @@ public sealed class TerminationResultReconcilerTests
         var identity = Id(100);
 
         IReadOnlyList<ProcessTerminationResult> final = TerminationResultReconciler.ApplyFinalRescan(
-            [Attempt(identity, ProcessTerminationStatus.Terminated)], SetOf(identity));
+            [identity], [Attempt(identity, ProcessTerminationStatus.Terminated)],
+            Verifications((identity, FinalIdentityState.Surviving)));
 
         var result = Assert.Single(final);
         Assert.Equal(ProcessTerminationStatus.Residual, result.Result);
@@ -100,7 +103,8 @@ public sealed class TerminationResultReconcilerTests
         var identity = Id(100);
 
         IReadOnlyList<ProcessTerminationResult> final = TerminationResultReconciler.ApplyFinalRescan(
-            [Attempt(identity, ProcessTerminationStatus.TimedOut)], SetOf());
+            [identity], [Attempt(identity, ProcessTerminationStatus.TimedOut)],
+            Verifications((identity, FinalIdentityState.Gone)));
 
         var result = Assert.Single(final);
         Assert.Equal(ProcessTerminationStatus.Terminated, result.Result);
@@ -112,12 +116,15 @@ public sealed class TerminationResultReconcilerTests
     [InlineData(ProcessTerminationStatus.Failed)]
     [InlineData(ProcessTerminationStatus.Residual)]
     [InlineData(ProcessTerminationStatus.NoWindow)]
+    [InlineData(ProcessTerminationStatus.UnreliableIdentity)]
+    [InlineData(ProcessTerminationStatus.IdentityMismatch)]
     public void 归并_未确认失败但FinalRescan已消失_修正为AlreadyExited不计residual(ProcessTerminationStatus status)
     {
         var identity = Id(100);
 
         IReadOnlyList<ProcessTerminationResult> final = TerminationResultReconciler.ApplyFinalRescan(
-            [Attempt(identity, status)], SetOf());
+            [identity], [Attempt(identity, status)],
+            Verifications((identity, FinalIdentityState.Gone)));
 
         var result = Assert.Single(final);
         Assert.Equal(ProcessTerminationStatus.AlreadyExited, result.Result);
@@ -130,11 +137,26 @@ public sealed class TerminationResultReconcilerTests
         var identity = Id(100);
 
         IReadOnlyList<ProcessTerminationResult> final = TerminationResultReconciler.ApplyFinalRescan(
-            [Attempt(identity, ProcessTerminationStatus.AlreadyExited)], SetOf());
+            [identity], [Attempt(identity, ProcessTerminationStatus.AlreadyExited)],
+            Verifications((identity, FinalIdentityState.Gone)));
 
         var result = Assert.Single(final);
         Assert.Equal(ProcessTerminationStatus.AlreadyExited, result.Result);
         Assert.Equal("AlreadyExited", result.Message);
+    }
+
+    [Fact]
+    public void 归并_PidReused与Gone同样视为原identity已退出()
+    {
+        var identity = Id(100);
+
+        IReadOnlyList<ProcessTerminationResult> final = TerminationResultReconciler.ApplyFinalRescan(
+            [identity], [Attempt(identity, ProcessTerminationStatus.TimedOut)],
+            Verifications((identity, FinalIdentityState.PidReused)));
+
+        var result = Assert.Single(final);
+        Assert.Equal(ProcessTerminationStatus.Terminated, result.Result);
+        Assert.True(result.ConfirmedExited);
     }
 
     [Fact]
@@ -144,16 +166,115 @@ public sealed class TerminationResultReconcilerTests
         var reused = Id(100, offsetSeconds: 30); // 同 PID、不同 StartTime（复用后实例）
 
         IReadOnlyList<ProcessTerminationResult> final = TerminationResultReconciler.ApplyFinalRescan(
+            [original, reused],
         [
             Attempt(original, ProcessTerminationStatus.Terminated),
             Attempt(reused, ProcessTerminationStatus.TimedOut),
-        ], SetOf(reused));
+        ],
+            Verifications((original, FinalIdentityState.Gone), (reused, FinalIdentityState.Surviving)));
 
         Assert.Equal(2, final.Count);
         Assert.Contains(final, r => r.ExpectedIdentity == original
             && r.Result == ProcessTerminationStatus.Terminated);
         Assert.Contains(final, r => r.ExpectedIdentity == reused
             && r.Result == ProcessTerminationStatus.Residual);
+    }
+
+    // ================= ApplyFinalRescan：fail-closed 与 targeted 全覆盖（P6.2） =================
+
+    [Theory]
+    [InlineData(ProcessTerminationStatus.Terminated)]
+    [InlineData(ProcessTerminationStatus.ClosedGracefully)]
+    [InlineData(ProcessTerminationStatus.AlreadyExited)]
+    [InlineData(ProcessTerminationStatus.TimedOut)]
+    [InlineData(ProcessTerminationStatus.AccessDenied)]
+    public void 归并_Uncertain_无论历史状态一律Residual_failClosed(ProcessTerminationStatus history)
+    {
+        var identity = Id(100);
+
+        IReadOnlyList<ProcessTerminationResult> final = TerminationResultReconciler.ApplyFinalRescan(
+            [identity], [Attempt(identity, history)],
+            Verifications((identity, FinalIdentityState.Uncertain)));
+
+        var result = Assert.Single(final);
+        Assert.Equal(ProcessTerminationStatus.Residual, result.Result);
+        Assert.False(result.ConfirmedExited);
+    }
+
+    [Fact]
+    public void 归并_targeted无历史结果且Final确认仍存在_生成Residual()
+    {
+        var identity = Id(100);
+
+        IReadOnlyList<ProcessTerminationResult> final = TerminationResultReconciler.ApplyFinalRescan(
+            [identity], [], Verifications((identity, FinalIdentityState.Surviving)));
+
+        var result = Assert.Single(final);
+        Assert.Equal(ProcessTerminationStatus.Residual, result.Result);
+        Assert.False(result.ConfirmedExited);
+        Assert.Contains("未执行终止动作", result.Message);
+        Assert.Equal(identity, result.ExpectedIdentity);
+    }
+
+    [Fact]
+    public void 归并_targeted无历史结果且Final确认不存在_生成AlreadyExited()
+    {
+        var identity = Id(100);
+
+        IReadOnlyList<ProcessTerminationResult> final = TerminationResultReconciler.ApplyFinalRescan(
+            [identity], [], Verifications((identity, FinalIdentityState.Gone)));
+
+        var result = Assert.Single(final);
+        Assert.Equal(ProcessTerminationStatus.AlreadyExited, result.Result);
+        Assert.True(result.ConfirmedExited);
+        Assert.Contains("未执行终止动作", result.Message);
+    }
+
+    [Fact]
+    public void 归并_验证结论缺失_按failClosed视为Residual()
+    {
+        var identity = Id(100);
+
+        IReadOnlyList<ProcessTerminationResult> final = TerminationResultReconciler.ApplyFinalRescan(
+            [identity], [Attempt(identity, ProcessTerminationStatus.Terminated)], []);
+
+        var result = Assert.Single(final);
+        Assert.Equal(ProcessTerminationStatus.Residual, result.Result);
+        Assert.False(result.ConfirmedExited);
+    }
+
+    [Fact]
+    public void 归并_全部targeted身份都出现在最终结果_绝不静默遗漏()
+    {
+        // 混合场景：A 有历史结果且已退出；B 有历史结果仍存活；C 从未产生 attempt 且仍存活；
+        // D 从未产生 attempt 且已消失。最终结果必须恰好覆盖四个 targeted identity。
+        var a = Id(100);
+        var b = Id(200);
+        var c = Id(300);
+        var d = Id(400);
+
+        IReadOnlyList<ProcessTerminationResult> final = TerminationResultReconciler.ApplyFinalRescan(
+            [a, b, c, d],
+        [
+            Attempt(a, ProcessTerminationStatus.Terminated),
+            Attempt(b, ProcessTerminationStatus.TimedOut),
+        ],
+            Verifications(
+                (a, FinalIdentityState.Gone),
+                (b, FinalIdentityState.Surviving),
+                (c, FinalIdentityState.Surviving),
+                (d, FinalIdentityState.PidReused)));
+
+        Assert.Equal(4, final.Count);
+        Assert.Equal(4, final.Select(r => r.ExpectedIdentity).Distinct().Count());
+        Assert.Contains(final, r => r.ExpectedIdentity == a && r.Result == ProcessTerminationStatus.Terminated);
+        Assert.Contains(final, r => r.ExpectedIdentity == b && r.Result == ProcessTerminationStatus.Residual);
+        Assert.Contains(final, r => r.ExpectedIdentity == c && r.Result == ProcessTerminationStatus.Residual);
+        Assert.Contains(final, r => r.ExpectedIdentity == d && r.Result == ProcessTerminationStatus.AlreadyExited);
+        // Final survivor > 0 → 汇总绝不可能是 Success
+        var (status, reason) = TerminationResultReconciler.Summarize(final);
+        Assert.Equal(TerminationStatus.PartialSuccess, status);
+        Assert.Equal(TerminationFailureReason.ResidualRemain, reason);
     }
 
     // ================= Summarize =================
@@ -229,7 +350,7 @@ public sealed class TerminationResultReconcilerTests
             Attempt(identity, ProcessTerminationStatus.Terminated), // 残留清理轮
         ]);
         IReadOnlyList<ProcessTerminationResult> final = TerminationResultReconciler.ApplyFinalRescan(
-            latest, SetOf());
+            [identity], latest, Verifications((identity, FinalIdentityState.Gone)));
 
         var result = Assert.Single(final);
         Assert.Equal(ProcessTerminationStatus.Terminated, result.Result);
