@@ -15,8 +15,10 @@ namespace CuinProcessEase.Core.Termination;
 /// - ≥2 组匹配 → AmbiguousTarget；
 /// - Blocked / Indeterminate / RequiresElevation → 拒绝执行；
 /// - 候选中出现 Snapshot StartTime 不可靠的进程 → fail-closed 取消；
-/// - P6.3 破坏性范围门禁：组 Confidence &lt; High（Medium 弱证据组）时候选收窄为请求锚点成员，
-///   绝不自动扩展到组内新增成员；High / VeryHigh 组才允许全组候选（含新 helper）；
+/// - P6.3/P6.4 破坏性范围门禁：组 Confidence &lt; High（Medium 弱证据组）时候选收窄为请求锚点成员，
+///   绝不自动扩展到组内新增成员；High / VeryHigh 组 + Default 请求才允许全组候选（含新 helper）；
+/// - P6.4：弱证据多进程组未经 ExplicitWeakGroup 授权 → ScopeConfirmationRequired 拒绝执行；
+///   携带 ExplicitWeakGroup 授权时（无论组置信度）候选一律限定为用户确认过的 exact identities；
 /// - Proceed 时候选顺序：Root 优先，其余按 PID。
 /// </remarks>
 public static class TerminationPlanner
@@ -124,12 +126,27 @@ public static class TerminationPlanner
                     $"“{target.Identity.DisplayName}”安全状态未知，已阻止操作。");
         }
 
-        // P6.3 破坏性范围门禁：只有 High / VeryHigh 组（强证据：Verified 父子 + 附加证据、
-        // 相同 exe 完整路径）才授权把候选自动扩展到请求锚点之外的新成员（新浮现 helper 等）。
-        // Medium 组（相同安装目录 / 产品+公司 / 未验证父子等弱证据）无法排除
-        // "把无关进程误聚进组"的可能 → 候选收窄为请求锚点成员，组内其余成员绝不自动纳入
-        // （需要用户在 UI 单独确认后再发起）。单进程组（Unknown）锚点即全组，收窄无影响。
-        bool anchoredOnly = target.Confidence < GroupingConfidence.High;
+        // P6.4 Weak Group Scope Consent：弱证据多进程组（Confidence < High 且成员 > 1）
+        // 在用户未经过专门弱组确认对话框明确授权（ScopeConsent != ExplicitWeakGroup）时
+        // 一律拒绝执行（0 WM_CLOSE、0 TerminateProcess）——默认构造绝不自动获得弱组授权。
+        // 单进程组没有"错误扩大到其他成员"的 blast radius，无需额外确认。
+        bool weakMultiProcessGroup = target.Confidence < GroupingConfidence.High && target.ProcessCount > 1;
+        if (weakMultiProcessGroup && request.ScopeConsent != TerminationScopeConsent.ExplicitWeakGroup)
+        {
+            return Cancel(TerminationStatus.ScopeConfirmationRequired,
+                TerminationFailureReason.ScopeConfirmationRequired,
+                $"“{target.Identity.DisplayName}”为弱证据分组（可信度 {target.Confidence}，{target.ProcessCount} 个进程），"
+                + "需在确认对话框中明确确认要操作的进程后才能结束。");
+        }
+
+        // P6.3/P6.4 破坏性范围门禁：以下两种情形候选收窄为请求锚点成员，绝不自动扩展：
+        // 1) 组 Confidence < High（弱证据组，即使已 ExplicitWeakGroup 授权，
+        //    也只操作用户确认过的 exact identities，组内新出现的弱证据成员绝不纳入）；
+        // 2) 请求携带 ExplicitWeakGroup 授权（用户只授权了确认时列出的成员，
+        //    即使 Fresh 组呈强证据也不得超出确认范围自动扩展新 helper）。
+        // High / VeryHigh 组 + Default 请求：允许全组候选（含新浮现 helper，原设计保留）。
+        bool anchoredOnly = target.Confidence < GroupingConfidence.High
+                            || request.ScopeConsent == TerminationScopeConsent.ExplicitWeakGroup;
         var anchorSet = new HashSet<ProcessIdentity>(anchors);
         List<ProcessSnapshot> candidatePool = anchoredOnly
             ? target.Processes.Where(p => anchorSet.Contains(p.Identity)).ToList()
@@ -154,11 +171,19 @@ public static class TerminationPlanner
                 $"“{target.Identity.DisplayName}”存在无法确认启动时间的成员，无法安全校验身份，已拒绝操作。");
         }
 
-        string message = anchoredOnly
-            ? $"目标组“{target.Identity.DisplayName}”置信度仅 {target.Confidence}，"
-              + $"仅终止请求确认的 {candidates.Count} 个成员"
-              + $"（组内另有 {target.ProcessCount - candidates.Count} 个弱证据关联成员未纳入，需单独确认）。"
-            : $"目标组“{target.Identity.DisplayName}”（{candidates.Count} 个进程）。";
+        string message;
+        if (!anchoredOnly)
+        {
+            message = $"目标组“{target.Identity.DisplayName}”（{candidates.Count} 个进程）。";
+        }
+        else
+        {
+            int excluded = target.ProcessCount - candidates.Count;
+            message = excluded > 0
+                ? $"目标组“{target.Identity.DisplayName}”：仅终止请求确认的 {candidates.Count} 个成员"
+                  + $"（组内另有 {excluded} 个成员未纳入授权范围，绝不自动扩展）。"
+                : $"目标组“{target.Identity.DisplayName}”（请求确认的 {candidates.Count} 个成员）。";
+        }
 
         return new TerminationPlan
         {

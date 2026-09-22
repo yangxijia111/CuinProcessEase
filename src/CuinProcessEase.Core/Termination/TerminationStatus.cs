@@ -36,4 +36,7 @@ public enum TerminationStatus
 
     /// <summary>执行失败（含身份不可靠、执行期错误等，详见 FailureReason）。</summary>
     Failed = 9,
+
+    /// <summary>弱证据多进程组未经用户明确确认操作范围（P6.4），0 破坏性动作。</summary>
+    ScopeConfirmationRequired = 10,
 }

@@ -1,5 +1,6 @@
 using System.Collections.ObjectModel;
 using System.Diagnostics;
+using System.Runtime.CompilerServices;
 using System.Windows;
 using System.Windows.Threading;
 using CuinProcessEase.App.Mvvm;
@@ -18,6 +19,8 @@ using CuinProcessEase.Windows.Safety;
 using CuinProcessEase.Windows.Services;
 using CuinProcessEase.Windows.Termination;
 
+[assembly: InternalsVisibleTo("CuinProcessEase.App.Tests")]
+
 namespace CuinProcessEase.App.ViewModels;
 
 /// <summary>
@@ -33,9 +36,9 @@ public sealed class MainViewModel : ObservableObject, IDisposable
 {
     private static readonly TimeSpan RefreshInterval = TimeSpan.FromSeconds(1);
 
-    private readonly IProcessSnapshotService _snapshotService = new ProcessSnapshotService();
-    private readonly CachedProcessSafetyService _safetyService = new(new ProcessSafetyService());
-    private readonly IProcessTerminationService _terminationService = new ProcessTerminationService();
+    private readonly IProcessSnapshotService _snapshotService;
+    private readonly CachedProcessSafetyService _safetyService;
+    private readonly IProcessTerminationService _terminationService;
     private readonly ProcessResourceSampler _sampler = new();
     private readonly SystemResourceMonitor _systemMonitor = new();
     private readonly ProcessCommandLineProvider _commandLineProvider = new();
@@ -55,7 +58,22 @@ public sealed class MainViewModel : ObservableObject, IDisposable
     private readonly DispatcherTimer _searchDebounce;
 
     public MainViewModel()
+        : this(
+            new ProcessSnapshotService(),
+            new ProcessSafetyService(),
+            new ProcessTerminationService())
     {
+    }
+
+    /// <summary>测试构造：注入 fake 快照 / 安全 / 终止服务，其余管线保持真实路径。</summary>
+    internal MainViewModel(
+        IProcessSnapshotService snapshotService,
+        IProcessSafetyService freshSafety,
+        IProcessTerminationService terminationService)
+    {
+        _snapshotService = snapshotService;
+        _safetyService = new CachedProcessSafetyService(freshSafety);
+        _terminationService = terminationService;
         _dispatcher = Dispatcher.CurrentDispatcher;
         _iconCache = new IconCacheService(_dispatcher);
         _currentSessionId = Process.GetCurrentProcess().SessionId;
@@ -152,6 +170,8 @@ public sealed class MainViewModel : ObservableObject, IDisposable
     /// 结束应用：点击时以当前行成员身份构建不可变 TerminationRequest，
     /// 引擎内部重新走 Fresh Snapshot / Grouping / Safety / Identity Preflight，
     /// 绝不使用 UI 行缓存或 StableKey 定位目标。
+    /// 弱证据多进程组（P6.4）：必须先经过显著不同的弱组范围确认（列出全部将操作的进程），
+    /// 用户确认后请求才携带 ExplicitWeakGroup，且授权范围仅限确认时列出的 exact identities。
     /// </summary>
     private async Task ExecuteTerminationAsync()
     {
@@ -163,10 +183,43 @@ public sealed class MainViewModel : ObservableObject, IDisposable
             return;
         }
 
+        // P6.4 弱组范围确认：Confidence < High 且成员 > 1 时，普通"结束应用"确认不足以授权
+        // 弱证据分组的整组操作——必须先显示专门确认（列出全部进程），绝不静默当作普通组。
+        // 单进程组没有"错误扩大到其他成员"的 blast radius，无需额外确认。
+        bool weakGroup = row.Confidence < GroupingConfidence.High && row.ProcessCount > 1;
+        TerminationScopeConsent scopeConsent = TerminationScopeConsent.Default;
+        if (weakGroup)
+        {
+            string processList = string.Join("\n", row.Processes.Select(p => $"- {p.Name}"));
+            string confidenceText = row.Confidence switch
+            {
+                GroupingConfidence.Medium => "中等",
+                GroupingConfidence.Low => "低",
+                _ => "未知",
+            };
+            Trace.WriteLine("[Kill] showing weak-group scope consent dialog");
+            if (Confirm?.Invoke(
+                    $"该应用组的关联可信度为“{confidenceText}”。\n\n"
+                    + "其中部分进程仅根据安装目录、产品信息等弱证据判断为相关，\n"
+                    + "可能并不属于同一个软件。\n\n"
+                    + $"本次将操作以下已识别进程：\n{processList}\n共 {row.ProcessCount} 个。\n\n"
+                    + "只有确认这些进程确实属于你想关闭的软件时才继续。",
+                    "确认弱关联应用组") != true)
+            {
+                Trace.WriteLine("[Kill] weak-group scope consent refused/unavailable");
+                return;
+            }
+
+            scopeConsent = TerminationScopeConsent.ExplicitWeakGroup;
+        }
+
         var request = new TerminationRequest(
             row.DisplayName,
             row.Processes.Select(p => p.Identity).ToList(),
-            DateTimeOffset.UtcNow);
+            DateTimeOffset.UtcNow)
+        {
+            ScopeConsent = scopeConsent,
+        };
         if (!request.IsValid)
         {
             Alert?.Invoke("无法安全定位该应用的进程身份，已取消操作。", "结束应用");
@@ -241,6 +294,7 @@ public sealed class MainViewModel : ObservableObject, IDisposable
         TerminationStatus.Indeterminate => "安全状态未知，已阻止操作。",
         TerminationStatus.RequiresElevation => "需要管理员权限，当前版本不执行。",
         TerminationStatus.IdentityMismatch => "身份校验失败，已在执行任何终止动作前取消。",
+        TerminationStatus.ScopeConfirmationRequired => "该应用组为弱证据分组，需在确认对话框中明确确认要操作的进程后才能结束。",
         _ => $"操作失败：{r.Message ?? "未知原因"}",
     };
 

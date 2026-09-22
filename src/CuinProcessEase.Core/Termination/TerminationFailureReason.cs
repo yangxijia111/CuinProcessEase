@@ -23,4 +23,7 @@ public enum TerminationFailureReason
 
     /// <summary>执行期错误（OpenProcess / Win32 调用失败等）。</summary>
     ExecutionError = 6,
+
+    /// <summary>弱证据多进程组未获得用户明确范围确认（P6.4）。</summary>
+    ScopeConfirmationRequired = 7,
 }

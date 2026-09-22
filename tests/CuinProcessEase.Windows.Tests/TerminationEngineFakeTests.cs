@@ -308,6 +308,13 @@ public sealed class TerminationEngineFakeTests
     private static TerminationRequest GroupRequest(params ProcessIdentity[] identities) => new(
         "Fake App", identities, DateTimeOffset.UtcNow);
 
+    /// <summary>携带 ExplicitWeakGroup 弱组范围授权的请求（P6.4）。</summary>
+    private static TerminationRequest WeakConsentGroupRequest(params ProcessIdentity[] identities) => new(
+        "Fake App", identities, DateTimeOffset.UtcNow)
+    {
+        ScopeConsent = TerminationScopeConsent.ExplicitWeakGroup,
+    };
+
     // ================= Preflight fail-all =================
 
     [Fact]
@@ -675,16 +682,39 @@ public sealed class TerminationEngineFakeTests
         Assert.Equal(GroupingConfidence.Medium, premiseGroup.Confidence);
 
         ApplicationTerminationResult result = await service.ForceTerminateApplicationAsync(
-            GroupRequest(IdentityOf(100, BaseFileTime)));
+            WeakConsentGroupRequest(IdentityOf(100, BaseFileTime)));
 
-        // Medium 组不足以授权自动扩展杀伤范围：只终止请求锚点 A，弱证据成员 B 绝不纳入
+        // 已授权的弱组：只终止用户确认的锚点 A，弱证据成员 B 绝不纳入
         Assert.Equal(TerminationStatus.Success, result.Status);
         Assert.Equal(0, result.ResidualCount);
         Assert.True(a.Exited);
         Assert.False(b.Exited); // B 从未成为候选
         Assert.Equal(1, interop.TerminateCount);
         Assert.Equal(100, Assert.Single(result.ProcessResults).Pid);
-        Assert.Contains("弱证据", result.Message); // 用户可感知收窄原因
+        Assert.Contains("授权范围", result.Message); // 用户可感知范围收窄原因
+    }
+
+    [Fact]
+    public async Task P64_Medium多进程组_Default未授权_ScopeConfirmationRequired零破坏()
+    {
+        (FakeTerminationInterop interop, ProcessTerminationService service) = CreateService();
+
+        // 同 P63 配方：A、B 同目录不同 exe → Medium 弱证据组
+        FakeProcess a = AddProcess(interop, 100, BaseFileTime);
+        a.ExecutablePath = @"C:\FakeApps\Medium\app.exe";
+        FakeProcess b = AddProcess(interop, 200, BaseFileTime + 1_000, parentPid: 9999);
+        b.Name = "helper.exe";
+        b.ExecutablePath = @"C:\FakeApps\Medium\helper.exe";
+
+        // Default 请求（未经专门弱组确认，即使 UI 把整行成员都列为 anchors）
+        ApplicationTerminationResult result = await service.ForceTerminateApplicationAsync(
+            GroupRequest(IdentityOf(100, BaseFileTime), IdentityOf(200, BaseFileTime + 1_000)));
+
+        Assert.Equal(TerminationStatus.ScopeConfirmationRequired, result.Status);
+        Assert.Equal(TerminationFailureReason.ScopeConfirmationRequired, result.FailureReason);
+        Assert.Empty(interop.DestructiveCalls); // 0 WM_CLOSE、0 TerminateProcess
+        Assert.False(a.Exited);
+        Assert.False(b.Exited);
     }
 
     [Fact]

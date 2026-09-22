@@ -175,8 +175,14 @@ public sealed class ProcessTerminationService : IProcessTerminationService
                     await Task.Delay(ResidualPassDelayMs, cancellationToken).ConfigureAwait(false);
                     ProcessSnapshotCollection rescan = await _snapshotService.CaptureAsync(cancellationToken).ConfigureAwait(false);
                     IReadOnlyList<ApplicationGroup> rescanGroups = ApplicationGroupingEngine.Group(rescan);
+                    // P6.4：残留清理轮继承原请求的范围授权——弱组（ExplicitWeakGroup）残留轮
+                    // 只能继续处理此前用户明确确认过的 surviving anchors，绝不因重新分组
+                    // 发现新 helper 而扩大范围；High 组 + Default 保持原 helper 扩展设计。
                     var followUp = new TerminationRequest(
-                        request.ExpectedDisplayName, survivors, DateTimeOffset.UtcNow);
+                        request.ExpectedDisplayName, survivors, DateTimeOffset.UtcNow)
+                    {
+                        ScopeConsent = request.ScopeConsent,
+                    };
                     TerminationPlanner.TerminationPlan subPlan = TerminationPlanner.Plan(
                         followUp, rescanGroups, rescan.Processes, g => _freshSafety.Assess(g));
 

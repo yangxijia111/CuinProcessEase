@@ -39,6 +39,15 @@ public sealed class TerminationPlannerTests
         members.Select(p => p.Identity).ToList(),
         DateTimeOffset.UtcNow);
 
+    /// <summary>携带 ExplicitWeakGroup 弱组范围授权的请求（P6.4）。</summary>
+    private static TerminationRequest WeakConsentRequest(params ProcessSnapshot[] members) => new(
+        "Test App",
+        members.Select(p => p.Identity).ToList(),
+        DateTimeOffset.UtcNow)
+    {
+        ScopeConsent = TerminationScopeConsent.ExplicitWeakGroup,
+    };
+
     private static ApplicationSafetyResult SafetyOf(SafetyDecision decision) => new()
     {
         DisplayName = "Test App",
@@ -212,7 +221,7 @@ public sealed class TerminationPlannerTests
         Assert.Null(plan.TargetGroup);
     }
 
-    // ================= P6.3：Medium 组破坏性范围门禁 =================
+    // ================= P6.3/P6.4：弱组破坏性范围门禁与 Scope Consent =================
 
     [Fact]
     public void 规划_High置信度组_候选扩展到全组含新增成员()
@@ -229,33 +238,73 @@ public sealed class TerminationPlannerTests
     }
 
     [Fact]
-    public void 规划_Medium置信度组_候选收窄为请求锚点_新增成员绝不纳入()
+    public void 规划_Medium多进程组_Default未授权_ScopeConfirmationRequired绝不执行()
     {
-        // 弱证据组（如同安装目录聚进来的无关进程）：即使 Fresh 分组把它和锚点并成一组，
-        // 也不授权自动扩展杀伤范围——候选仅限请求确认的 exact identity
-        var root = Snap(100, "app.exe");
-        var weakMember = Snap(200, "other.exe");
-        var group = Group("Test App", [root, weakMember], [root], GroupingConfidence.Medium);
-
-        var plan = TerminationPlanner.Plan(Request(root), [group], [root, weakMember], Allowed);
-
-        Assert.True(plan.Proceed);
-        Assert.Equal([100], plan.Candidates.Select(p => p.ProcessId));
-        Assert.Contains("弱证据", plan.Message);
-    }
-
-    [Fact]
-    public void 规划_Medium置信度组_全部成员均为锚点时候选不变()
-    {
-        // Medium 组但请求锚点覆盖全组（UI 常态：请求就是该行全部成员）→ 收窄不损失任何成员
+        // UI 把整行成员都作为 anchors 也一样：没有经过专门弱组确认就不得操作弱证据多进程组
         var root = Snap(100, "app.exe");
         var member = Snap(200, "other.exe");
         var group = Group("Test App", [root, member], [root], GroupingConfidence.Medium);
 
         var plan = TerminationPlanner.Plan(Request(root, member), [group], [root, member], Allowed);
 
+        Assert.False(plan.Proceed);
+        Assert.Equal(TerminationStatus.ScopeConfirmationRequired, plan.Status);
+        Assert.Equal(TerminationFailureReason.ScopeConfirmationRequired, plan.FailureReason);
+    }
+
+    [Fact]
+    public void 规划_Medium多进程组_ExplicitWeakGroup授权_仅操作明确确认的成员()
+    {
+        var root = Snap(100, "app.exe");
+        var member = Snap(200, "other.exe");
+        var group = Group("Test App", [root, member], [root], GroupingConfidence.Medium);
+
+        var plan = TerminationPlanner.Plan(WeakConsentRequest(root, member), [group], [root, member], Allowed);
+
         Assert.True(plan.Proceed);
         Assert.Equal([100, 200], plan.Candidates.Select(p => p.ProcessId));
+    }
+
+    [Fact]
+    public void 规划_ExplicitWeakGroup授权后_Fresh组新成员永不纳入()
+    {
+        // 用户确认 A+B 后 Fresh 组又出现 C：本次仍只能 A+B，绝不能自动杀 C
+        var root = Snap(100, "app.exe");
+        var member = Snap(200, "other.exe");
+        var newcomer = Snap(300, "another.exe");
+        var group = Group("Test App", [root, member, newcomer], [root], GroupingConfidence.Medium);
+
+        var plan = TerminationPlanner.Plan(WeakConsentRequest(root, member), [group], [root, member, newcomer], Allowed);
+
+        Assert.True(plan.Proceed);
+        Assert.Equal([100, 200], plan.Candidates.Select(p => p.ProcessId));
+    }
+
+    [Fact]
+    public void 规划_High组携带ExplicitWeakGroup_仍限定用户确认范围()
+    {
+        // 授权语义优先于组置信度：用户只确认了 root，即使 Fresh 组呈强证据也不得自动扩展新 helper
+        var root = Snap(100, "app.exe");
+        var newHelper = Snap(200, "app.exe");
+        var group = Group("Test App", [root, newHelper], [root], GroupingConfidence.High);
+
+        var plan = TerminationPlanner.Plan(WeakConsentRequest(root), [group], [root, newHelper], Allowed);
+
+        Assert.True(plan.Proceed);
+        Assert.Equal([100], plan.Candidates.Select(p => p.ProcessId));
+    }
+
+    [Fact]
+    public void 规划_Medium单进程组_Default无需额外弱组确认()
+    {
+        // 单进程没有"错误扩大到其他成员"的 blast radius
+        var only = Snap(100, "app.exe");
+        var group = Group("Test App", [only], [only], GroupingConfidence.Medium);
+
+        var plan = TerminationPlanner.Plan(Request(only), [group], [only], Allowed);
+
+        Assert.True(plan.Proceed);
+        Assert.Equal([100], plan.Candidates.Select(p => p.ProcessId));
     }
 
     [Fact]
@@ -270,7 +319,7 @@ public sealed class TerminationPlannerTests
         };
         var group = Group("Test App", [root, unreliable], [root], GroupingConfidence.Medium);
 
-        var plan = TerminationPlanner.Plan(Request(root), [group], [root, unreliable], Allowed);
+        var plan = TerminationPlanner.Plan(WeakConsentRequest(root), [group], [root, unreliable], Allowed);
 
         Assert.True(plan.Proceed);
         Assert.Equal([100], plan.Candidates.Select(p => p.ProcessId));
