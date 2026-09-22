@@ -35,4 +35,7 @@ public enum ProcessTerminationStatus
 
     /// <summary>身份不可靠（StartTime 缺失 / 句柄创建时间读取失败，无法安全校验），已整组取消。</summary>
     UnreliableIdentity = 10,
+
+    /// <summary>已跳过（整组取消：其他候选身份校验失败，该候选可能已通过验证但未执行、或从未验证，绝不执行任何终止动作）。</summary>
+    Skipped = 11,
 }

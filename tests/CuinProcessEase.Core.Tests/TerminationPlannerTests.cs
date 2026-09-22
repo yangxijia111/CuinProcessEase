@@ -25,12 +25,14 @@ public sealed class TerminationPlannerTests
     private static ApplicationGroup Group(
         string displayName,
         ProcessSnapshot[] processes,
-        ProcessSnapshot[]? roots = null) => new()
-        {
-            Identity = new ApplicationIdentity { DisplayName = displayName },
-            Processes = processes,
-            RootProcesses = roots ?? processes[..1],
-        };
+        ProcessSnapshot[]? roots = null,
+        GroupingConfidence confidence = GroupingConfidence.High) => new()
+    {
+        Identity = new ApplicationIdentity { DisplayName = displayName },
+        Processes = processes,
+        RootProcesses = roots ?? processes[..1],
+        Confidence = confidence,
+    };
 
     private static TerminationRequest Request(params ProcessSnapshot[] members) => new(
         "Test App",
@@ -208,5 +210,88 @@ public sealed class TerminationPlannerTests
         Assert.False(plan.Proceed);
         Assert.Equal(TerminationStatus.AlreadyExited, plan.Status);
         Assert.Null(plan.TargetGroup);
+    }
+
+    // ================= P6.3：Medium 组破坏性范围门禁 =================
+
+    [Fact]
+    public void 规划_High置信度组_候选扩展到全组含新增成员()
+    {
+        // 强证据组（Verified 父子 + 同 exe）：请求只锚定 root，Fresh 组新纳入的 helper 也进候选
+        var root = Snap(100, "app.exe");
+        var newHelper = Snap(200, "app.exe");
+        var group = Group("Test App", [root, newHelper], [root], GroupingConfidence.High);
+
+        var plan = TerminationPlanner.Plan(Request(root), [group], [root, newHelper], Allowed);
+
+        Assert.True(plan.Proceed);
+        Assert.Equal([100, 200], plan.Candidates.Select(p => p.ProcessId));
+    }
+
+    [Fact]
+    public void 规划_Medium置信度组_候选收窄为请求锚点_新增成员绝不纳入()
+    {
+        // 弱证据组（如同安装目录聚进来的无关进程）：即使 Fresh 分组把它和锚点并成一组，
+        // 也不授权自动扩展杀伤范围——候选仅限请求确认的 exact identity
+        var root = Snap(100, "app.exe");
+        var weakMember = Snap(200, "other.exe");
+        var group = Group("Test App", [root, weakMember], [root], GroupingConfidence.Medium);
+
+        var plan = TerminationPlanner.Plan(Request(root), [group], [root, weakMember], Allowed);
+
+        Assert.True(plan.Proceed);
+        Assert.Equal([100], plan.Candidates.Select(p => p.ProcessId));
+        Assert.Contains("弱证据", plan.Message);
+    }
+
+    [Fact]
+    public void 规划_Medium置信度组_全部成员均为锚点时候选不变()
+    {
+        // Medium 组但请求锚点覆盖全组（UI 常态：请求就是该行全部成员）→ 收窄不损失任何成员
+        var root = Snap(100, "app.exe");
+        var member = Snap(200, "other.exe");
+        var group = Group("Test App", [root, member], [root], GroupingConfidence.Medium);
+
+        var plan = TerminationPlanner.Plan(Request(root, member), [group], [root, member], Allowed);
+
+        Assert.True(plan.Proceed);
+        Assert.Equal([100, 200], plan.Candidates.Select(p => p.ProcessId));
+    }
+
+    [Fact]
+    public void 规划_Medium组非锚点成员StartTime不可靠_不触发取消()
+    {
+        // 门禁后非锚点成员不进候选，其 StartTime 不可靠与本操作无关，不得放大为整组取消
+        var root = Snap(100, "app.exe");
+        var unreliable = new ProcessSnapshot
+        {
+            Identity = new ProcessIdentity(200, null),
+            Name = "other.exe",
+        };
+        var group = Group("Test App", [root, unreliable], [root], GroupingConfidence.Medium);
+
+        var plan = TerminationPlanner.Plan(Request(root), [group], [root, unreliable], Allowed);
+
+        Assert.True(plan.Proceed);
+        Assert.Equal([100], plan.Candidates.Select(p => p.ProcessId));
+    }
+
+    [Fact]
+    public void 规划_High组候选StartTime不可靠_仍FailClosed取消()
+    {
+        // 强证据组全组候选时，组内 StartTime 不可靠成员仍触发 fail-closed（原防线保留）
+        var root = Snap(100, "app.exe");
+        var protectedHelper = new ProcessSnapshot
+        {
+            Identity = new ProcessIdentity(200, null),
+            Name = "helper.exe",
+        };
+        var group = Group("Test App", [root, protectedHelper], [root], GroupingConfidence.High);
+
+        var plan = TerminationPlanner.Plan(Request(root), [group], [root, protectedHelper], Allowed);
+
+        Assert.False(plan.Proceed);
+        Assert.Equal(TerminationStatus.Failed, plan.Status);
+        Assert.Equal(TerminationFailureReason.UnreliableIdentity, plan.FailureReason);
     }
 }

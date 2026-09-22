@@ -477,6 +477,9 @@ public sealed class ProcessTerminationService : IProcessTerminationService
     /// StartTimeUtc.ToFileTimeUtc() 逐位比对（绝无时间容差，差 1 tick 也拒绝）。
     /// 严格两阶段：任何候选身份不可靠 / 不匹配 / 句柄打开失败 → 在任何终止动作发生前取消整个操作。
     /// 已通过句柄确认 AlreadyExited 的候选不算失败。
+    /// P6.3：整组取消时每个候选都必须留下结构化结果——失败候选得到
+    /// UnreliableIdentity / AccessDenied / IdentityMismatch / Failed，
+    /// 已通过验证但未执行、以及排在失败候选之后从未验证的候选一律补 <see cref="ProcessTerminationStatus.Skipped"/>。
     /// </summary>
     private PreflightOutcome Preflight(
         IReadOnlyList<ProcessSnapshot> candidates,
@@ -508,7 +511,7 @@ public sealed class ProcessTerminationService : IProcessTerminationService
                 outcome.CancelStatus = TerminationStatus.Failed;
                 outcome.CancelReason = TerminationFailureReason.UnreliableIdentity;
                 outcome.CancelMessage = $"进程 {candidate.Name}（PID {candidate.ProcessId}）缺少启动时间，无法安全校验身份，已取消操作。";
-                return outcome;
+                break;
             }
 
             IntPtr handle = _interop.OpenProcess(access, inheritHandle: false, (uint)candidate.ProcessId, out int openError);
@@ -533,7 +536,7 @@ public sealed class ProcessTerminationService : IProcessTerminationService
                 outcome.CancelReason = TerminationFailureReason.ExecutionError;
                 outcome.CancelMessage = $"进程 {candidate.Name}（PID {candidate.ProcessId}）句柄打开失败"
                     + $"（Win32 错误 {openError}），无法验证身份，已取消整组操作（未执行任何终止动作）。";
-                return outcome;
+                break;
             }
 
             allHandles.Add(handle);
@@ -552,7 +555,7 @@ public sealed class ProcessTerminationService : IProcessTerminationService
                 outcome.CancelStatus = TerminationStatus.Failed;
                 outcome.CancelReason = TerminationFailureReason.UnreliableIdentity;
                 outcome.CancelMessage = $"进程 {candidate.Name}（PID {candidate.ProcessId}）无法读取创建时间，无法校验身份，已取消操作。";
-                return outcome;
+                break;
             }
 
             long expectedCreationFileTime = candidate.StartTimeUtc.Value.ToFileTimeUtc();
@@ -571,7 +574,7 @@ public sealed class ProcessTerminationService : IProcessTerminationService
                 outcome.CancelStatus = TerminationStatus.IdentityMismatch;
                 outcome.CancelReason = TerminationFailureReason.IdentityVerificationFailed;
                 outcome.CancelMessage = $"“{candidate.Name}”（PID {candidate.ProcessId}）身份校验失败：进程已不是原目标。已在执行任何终止动作前取消。";
-                return outcome;
+                break;
             }
 
             // 执行前已退出的进程（进程对象已 signaled）：已确认退出，不算失败
@@ -589,6 +592,27 @@ public sealed class ProcessTerminationService : IProcessTerminationService
             }
 
             outcome.Validated.Add(new ValidatedProcess { Handle = handle, Snapshot = candidate });
+        }
+
+        // P6.3 统一出口：整组取消时，没有结果记录的候选（已通过验证但未执行、
+        // 以及排在失败候选之后从未验证的）一律补 Skipped——绝不静默遗漏任何 candidate。
+        if (outcome.CancelStatus is not null)
+        {
+            HashSet<ProcessIdentity> withResult = [.. outcome.Results.Select(r => r.ExpectedIdentity)];
+            foreach (ProcessSnapshot candidate in candidates)
+            {
+                if (withResult.Add(candidate.Identity))
+                {
+                    outcome.Results.Add(new ProcessTerminationResult
+                    {
+                        Pid = candidate.ProcessId,
+                        ExpectedIdentity = candidate.Identity,
+                        ProcessName = candidate.Name,
+                        Result = ProcessTerminationStatus.Skipped,
+                        Message = "整组取消（其他候选身份校验失败）：该候选未执行任何终止动作。",
+                    });
+                }
+            }
         }
 
         return outcome;

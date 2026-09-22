@@ -45,6 +45,35 @@ public sealed class TerminationResultReconcilerTests
     }
 
     [Fact]
+    public void 归并_Skipped表示该轮未执行_绝不覆盖已有历史结果()
+    {
+        // 残留清理轮整组取消时 validated 候选补 Skipped：该身份第 0 轮的 TimedOut
+        // 信息量更大（确曾执行 TerminateProcess），不得被"未执行"掩盖
+        var identity = Id(100);
+        IReadOnlyList<ProcessTerminationResult> latest = TerminationResultReconciler.LatestResultByIdentity(
+        [
+            Attempt(identity, ProcessTerminationStatus.TimedOut),
+            Attempt(identity, ProcessTerminationStatus.Skipped),
+        ]);
+
+        var result = Assert.Single(latest);
+        Assert.Equal(ProcessTerminationStatus.TimedOut, result.Result);
+    }
+
+    [Fact]
+    public void 归并_仅有Skipped时保留Skipped()
+    {
+        // 该身份从未真正执行（整组取消）→ Skipped 就是其全部历史，必须保留
+        var identity = Id(100);
+        IReadOnlyList<ProcessTerminationResult> latest = TerminationResultReconciler.LatestResultByIdentity(
+            [Attempt(identity, ProcessTerminationStatus.Skipped)]);
+
+        var result = Assert.Single(latest);
+        Assert.Equal(ProcessTerminationStatus.Skipped, result.Result);
+        Assert.False(result.ConfirmedExited);
+    }
+
+    [Fact]
     public void 归并_不同身份互不覆盖_各自保留最后一次()
     {
         var a = Id(100);
@@ -118,6 +147,7 @@ public sealed class TerminationResultReconcilerTests
     [InlineData(ProcessTerminationStatus.NoWindow)]
     [InlineData(ProcessTerminationStatus.UnreliableIdentity)]
     [InlineData(ProcessTerminationStatus.IdentityMismatch)]
+    [InlineData(ProcessTerminationStatus.Skipped)]
     public void 归并_未确认失败但FinalRescan已消失_修正为AlreadyExited不计residual(ProcessTerminationStatus status)
     {
         var identity = Id(100);

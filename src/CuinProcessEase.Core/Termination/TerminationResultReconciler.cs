@@ -18,6 +18,8 @@ public static class TerminationResultReconciler
 {
     /// <summary>
     /// 每个 ProcessIdentity 的最终状态 = 最后一次尝试的结果（按输入顺序，后出现者覆盖）。
+    /// 例外：<see cref="ProcessTerminationStatus.Skipped"/> 表示"该轮整组取消、未执行"，
+    /// 不代表历史状态失效，绝不覆盖该身份已有的尝试结果。
     /// </summary>
     public static IReadOnlyList<ProcessTerminationResult> LatestResultByIdentity(
         IEnumerable<ProcessTerminationResult> attempts)
@@ -27,6 +29,12 @@ public static class TerminationResultReconciler
         var latest = new Dictionary<ProcessIdentity, ProcessTerminationResult>();
         foreach (ProcessTerminationResult attempt in attempts)
         {
+            if (attempt.Result == ProcessTerminationStatus.Skipped
+                && latest.ContainsKey(attempt.ExpectedIdentity))
+            {
+                continue;
+            }
+
             latest[attempt.ExpectedIdentity] = attempt;
         }
 
@@ -174,7 +182,8 @@ public static class TerminationResultReconciler
                 or ProcessTerminationStatus.Residual
                 or ProcessTerminationStatus.NoWindow
                 or ProcessTerminationStatus.UnreliableIdentity
-                or ProcessTerminationStatus.IdentityMismatch => Rewrite(
+                or ProcessTerminationStatus.IdentityMismatch
+                or ProcessTerminationStatus.Skipped => Rewrite(
                 result, ProcessTerminationStatus.AlreadyExited,
                 "本次操作未能终止该进程；Final Rescan 确认该身份已不存在（可能已被其他方式结束）。"),
             _ => result,

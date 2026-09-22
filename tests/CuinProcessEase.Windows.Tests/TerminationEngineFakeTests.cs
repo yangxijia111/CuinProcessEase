@@ -650,4 +650,72 @@ public sealed class TerminationEngineFakeTests
         Assert.Equal(1, interop.TerminateCount); // 仅第 0 轮 A；C 失败整组取消后 A/D 未再执行
         Assert.False(d.Exited);
     }
+
+    // ================= P6.3：Medium 组破坏性范围门禁 + Preflight 取消全候选结构化结果 =================
+
+    [Fact]
+    public async Task P63_Medium置信度组_破坏范围收窄到请求锚点_弱证据成员绝不纳入()
+    {
+        (FakeTerminationInterop interop, ProcessTerminationService service) = CreateService();
+
+        // A：请求锚点（root），exe 位于三层具体目录
+        FakeProcess a = AddProcess(interop, 100, BaseFileTime);
+        a.ExecutablePath = @"C:\FakeApps\Medium\app.exe";
+        // B：与 A 同目录但不同 exe、无父子关系 → 真实分组引擎只给 SameInstallDirectory（Medium）
+        FakeProcess b = AddProcess(interop, 200, BaseFileTime + 1_000, parentPid: 9999);
+        b.Name = "helper.exe";
+        b.ExecutablePath = @"C:\FakeApps\Medium\helper.exe";
+
+        // 守护前提：真实分组引擎确实把 A、B 聚成 Medium 置信度组
+        //（若分组规则变化导致前提失效，本测试必须失败而不是静默改测别的语义）
+        ProcessSnapshotCollection premise = await new FakeSnapshotService { Interop = interop }.CaptureAsync();
+        ApplicationGroup premiseGroup = ApplicationGroupingEngine.Group(premise)
+            .Single(g => g.Processes.Any(p => p.ProcessId == 100));
+        Assert.Equal(2, premiseGroup.ProcessCount);
+        Assert.Equal(GroupingConfidence.Medium, premiseGroup.Confidence);
+
+        ApplicationTerminationResult result = await service.ForceTerminateApplicationAsync(
+            GroupRequest(IdentityOf(100, BaseFileTime)));
+
+        // Medium 组不足以授权自动扩展杀伤范围：只终止请求锚点 A，弱证据成员 B 绝不纳入
+        Assert.Equal(TerminationStatus.Success, result.Status);
+        Assert.Equal(0, result.ResidualCount);
+        Assert.True(a.Exited);
+        Assert.False(b.Exited); // B 从未成为候选
+        Assert.Equal(1, interop.TerminateCount);
+        Assert.Equal(100, Assert.Single(result.ProcessResults).Pid);
+        Assert.Contains("弱证据", result.Message); // 用户可感知收窄原因
+    }
+
+    [Fact]
+    public async Task P63_初始Preflight取消_全部候选都有结构化结果()
+    {
+        (FakeTerminationInterop interop, ProcessTerminationService service) = CreateService();
+
+        // 同 exe + verified 父子 → High 组，A/B/C 全体进候选；B 的 GetProcessTimes 失败 → 整组取消
+        FakeProcess a = AddProcess(interop, 100, BaseFileTime);
+        FakeProcess b = AddProcess(interop, 200, BaseFileTime + 1_000, parentPid: 100);
+        b.TimesFails = true;
+        FakeProcess c = AddProcess(interop, 300, BaseFileTime + 2_000, parentPid: 100);
+
+        ApplicationTerminationResult result = await service.ForceTerminateApplicationAsync(
+            GroupRequest(IdentityOf(100, BaseFileTime), IdentityOf(200, BaseFileTime + 1_000),
+                IdentityOf(300, BaseFileTime + 2_000)));
+
+        Assert.Equal(TerminationStatus.Failed, result.Status);
+        Assert.Equal(TerminationFailureReason.UnreliableIdentity, result.FailureReason);
+        Assert.Empty(interop.DestructiveCalls); // 整组取消：0 TerminateProcess、0 WM_CLOSE
+        // P6.3：cancel 时全部 candidate 都有结构化结果——
+        // A（已通过验证但未执行）与 C（排在失败候选之后从未验证）= Skipped，
+        // B（失败者本身）= UnreliableIdentity
+        Assert.Equal(3, result.ProcessResults.Count);
+        Assert.Contains(result.ProcessResults, r => r.Pid == 100
+            && r.Result == ProcessTerminationStatus.Skipped);
+        Assert.Contains(result.ProcessResults, r => r.Pid == 200
+            && r.Result == ProcessTerminationStatus.UnreliableIdentity);
+        Assert.Contains(result.ProcessResults, r => r.Pid == 300
+            && r.Result == ProcessTerminationStatus.Skipped);
+        // 三者都无法确认退出 → 全部计入 ResidualIdentities
+        Assert.Equal(3, result.ResidualCount);
+    }
 }

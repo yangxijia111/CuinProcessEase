@@ -15,6 +15,8 @@ namespace CuinProcessEase.Core.Termination;
 /// - ≥2 组匹配 → AmbiguousTarget；
 /// - Blocked / Indeterminate / RequiresElevation → 拒绝执行；
 /// - 候选中出现 Snapshot StartTime 不可靠的进程 → fail-closed 取消；
+/// - P6.3 破坏性范围门禁：组 Confidence &lt; High（Medium 弱证据组）时候选收窄为请求锚点成员，
+///   绝不自动扩展到组内新增成员；High / VeryHigh 组才允许全组候选（含新 helper）；
 /// - Proceed 时候选顺序：Root 优先，其余按 PID。
 /// </remarks>
 public static class TerminationPlanner
@@ -122,14 +124,24 @@ public static class TerminationPlanner
                     $"“{target.Identity.DisplayName}”安全状态未知，已阻止操作。");
         }
 
-        // 候选 = Fresh Group 全体成员（含新产生的 helper/child，后续仍需 Identity Preflight）。
-        // 顺序：Root 优先（先切断主要控制），其余按 PID。
+        // P6.3 破坏性范围门禁：只有 High / VeryHigh 组（强证据：Verified 父子 + 附加证据、
+        // 相同 exe 完整路径）才授权把候选自动扩展到请求锚点之外的新成员（新浮现 helper 等）。
+        // Medium 组（相同安装目录 / 产品+公司 / 未验证父子等弱证据）无法排除
+        // "把无关进程误聚进组"的可能 → 候选收窄为请求锚点成员，组内其余成员绝不自动纳入
+        // （需要用户在 UI 单独确认后再发起）。单进程组（Unknown）锚点即全组，收窄无影响。
+        bool anchoredOnly = target.Confidence < GroupingConfidence.High;
+        var anchorSet = new HashSet<ProcessIdentity>(anchors);
+        List<ProcessSnapshot> candidatePool = anchoredOnly
+            ? target.Processes.Where(p => anchorSet.Contains(p.Identity)).ToList()
+            : [.. target.Processes];
+
+        // 候选顺序：Root 优先（先切断主要控制），其余按 PID。
         var rootIds = new HashSet<ProcessIdentity>(target.RootProcesses.Select(p => p.Identity));
-        List<ProcessSnapshot> roots = target.Processes
+        List<ProcessSnapshot> roots = candidatePool
             .Where(p => rootIds.Contains(p.Identity))
             .OrderBy(p => p.ProcessId)
             .ToList();
-        List<ProcessSnapshot> others = target.Processes
+        List<ProcessSnapshot> others = candidatePool
             .Where(p => !rootIds.Contains(p.Identity))
             .OrderBy(p => p.ProcessId)
             .ToList();
@@ -142,12 +154,18 @@ public static class TerminationPlanner
                 $"“{target.Identity.DisplayName}”存在无法确认启动时间的成员，无法安全校验身份，已拒绝操作。");
         }
 
+        string message = anchoredOnly
+            ? $"目标组“{target.Identity.DisplayName}”置信度仅 {target.Confidence}，"
+              + $"仅终止请求确认的 {candidates.Count} 个成员"
+              + $"（组内另有 {target.ProcessCount - candidates.Count} 个弱证据关联成员未纳入，需单独确认）。"
+            : $"目标组“{target.Identity.DisplayName}”（{candidates.Count} 个进程）。";
+
         return new TerminationPlan
         {
             Proceed = true,
             TargetGroup = target,
             Candidates = candidates,
-            Message = $"目标组“{target.Identity.DisplayName}”（{candidates.Count} 个进程）。",
+            Message = message,
         };
     }
 
