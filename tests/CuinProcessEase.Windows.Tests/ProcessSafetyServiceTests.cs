@@ -349,10 +349,13 @@ public sealed class ProcessSafetyServiceTests
 
         ProcessSafetyResult result = Service.Assess(defender);
 
-        Assert.Equal(RiskLevel.Protected, result.RiskLevel);
+        // 装有第三方杀软（如火绒接管 Defender）时 MsMpEng 可能不以 PPL 运行或查询不到，
+        // 此时允许 SYSTEM 账户/Session 0 证据兜底为 System——两者都是 Blocked；
+        // 本测试真正的安全底线是"绝不允许 Allowed"
+        Assert.True(
+            result.RiskLevel is RiskLevel.Protected or RiskLevel.System,
+            $"MsMpEng 应为 Protected(PPL) 或 System(SYSTEM 账户兜底)，实际 {result.RiskLevel}");
         Assert.Equal(SafetyDecision.Blocked, result.Decision);
-        // PPL-AM：实测 ProtectionLevel 应为 3（ANTIMALWARE_LIGHT = 0x3）；查询不到也应被
-        // SYSTEM 账户兜底为 System/Blocked，绝不允许 Allowed
         Assert.NotEqual(SafetyDecision.Allowed, result.Decision);
         Assert.True(
             result.ProtectionLevel is null or (uint)PROTECTION_LEVEL.PROTECTION_LEVEL_ANTIMALWARE_LIGHT,

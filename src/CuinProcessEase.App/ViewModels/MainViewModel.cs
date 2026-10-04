@@ -147,7 +147,7 @@ public sealed class MainViewModel : ObservableObject, IDisposable
         ? "正在关闭…"
         : SelectedRow?.SafetyDecision switch
         {
-            SafetyDecision.RequiresElevation => "需要管理员权限",
+            SafetyDecision.RequiresElevation => "以管理员身份强制结束",
             SafetyDecision.Blocked => "系统保护，无法结束",
             SafetyDecision.Indeterminate => "安全状态未知，已阻止操作",
             _ => "结束应用",
@@ -155,11 +155,11 @@ public sealed class MainViewModel : ObservableObject, IDisposable
 
     public bool KillButtonEnabled
         => !IsTerminationRunning
-           && SelectedRow is { SafetyDecision: SafetyDecision.Allowed };
+           && SelectedRow is { SafetyDecision: SafetyDecision.Allowed or SafetyDecision.RequiresElevation };
 
     public string KillButtonToolTip => SelectedRow?.SafetyDecision switch
     {
-        SafetyDecision.RequiresElevation => "需要管理员权限，当前版本不提供提权",
+        SafetyDecision.RequiresElevation => "该应用以管理员权限运行，将通过管理员 Helper（弹出 UAC）强制结束",
         SafetyDecision.Blocked => "系统保护，无法结束",
         SafetyDecision.Indeterminate => "安全状态未知，已阻止操作",
         SafetyDecision.Allowed => "先尝试正常关闭该应用及其相关进程",
@@ -172,57 +172,32 @@ public sealed class MainViewModel : ObservableObject, IDisposable
     /// 绝不使用 UI 行缓存或 StableKey 定位目标。
     /// 弱证据多进程组（P6.4）：必须先经过显著不同的弱组范围确认（列出全部将操作的进程），
     /// 用户确认后请求才携带 ExplicitWeakGroup，且授权范围仅限确认时列出的 exact identities。
+    /// 提权目标（P7）：RequiresElevation 行需先经专门的提权确认（说明 UAC 与强杀语义），
+    /// 确认后请求携带 AllowElevation，通过一次 UAC 的 Elevated Helper 执行；
+    /// 普通流程中 Fresh Safety 变为 RequiresElevation 时，同样先询问再提权重试。
     /// </summary>
     private async Task ExecuteTerminationAsync()
     {
         ApplicationRowViewModel? row = SelectedRow;
         Trace.WriteLine($"[Kill] enter: row={row?.DisplayName ?? "null"} running={IsTerminationRunning} confirm={Confirm != null} decision={row?.SafetyDecision}");
-        if (row is null || IsTerminationRunning || row.SafetyDecision != SafetyDecision.Allowed)
+        if (row is null || IsTerminationRunning
+            || row.SafetyDecision is not (SafetyDecision.Allowed or SafetyDecision.RequiresElevation))
         {
             Trace.WriteLine("[Kill] exit: pre-check refused");
             return;
         }
 
-        // P6.4 弱组范围确认：Confidence < High 且成员 > 1 时，普通"结束应用"确认不足以授权
-        // 弱证据分组的整组操作——必须先显示专门确认（列出全部进程），绝不静默当作普通组。
-        // 单进程组没有"错误扩大到其他成员"的 blast radius，无需额外确认。
-        bool weakGroup = row.Confidence < GroupingConfidence.High && row.ProcessCount > 1;
-        TerminationScopeConsent scopeConsent = TerminationScopeConsent.Default;
-        if (weakGroup)
+        // P7 提权路径：管理员权限运行的应用直接走 Elevated Helper 强制终止
+        if (row.SafetyDecision == SafetyDecision.RequiresElevation)
         {
-            string processList = string.Join("\n", row.Processes.Select(p => $"- {p.Name}"));
-            string confidenceText = row.Confidence switch
-            {
-                GroupingConfidence.Medium => "中等",
-                GroupingConfidence.Low => "低",
-                _ => "未知",
-            };
-            Trace.WriteLine("[Kill] showing weak-group scope consent dialog");
-            if (Confirm?.Invoke(
-                    $"该应用组的关联可信度为“{confidenceText}”。\n\n"
-                    + "其中部分进程仅根据安装目录、产品信息等弱证据判断为相关，\n"
-                    + "可能并不属于同一个软件。\n\n"
-                    + $"本次将操作以下已识别进程：\n{processList}\n共 {row.ProcessCount} 个。\n\n"
-                    + "只有确认这些进程确实属于你想关闭的软件时才继续。",
-                    "确认弱关联应用组") != true)
-            {
-                Trace.WriteLine("[Kill] weak-group scope consent refused/unavailable");
-                return;
-            }
-
-            scopeConsent = TerminationScopeConsent.ExplicitWeakGroup;
+            await ExecuteElevatedTerminationAsync(row);
+            return;
         }
 
-        var request = new TerminationRequest(
-            row.DisplayName,
-            row.Processes.Select(p => p.Identity).ToList(),
-            DateTimeOffset.UtcNow)
+        // P6.4 弱组范围确认 + 请求构建（普通 / 提权路径共用）
+        TerminationRequest? request = BuildRequestWithScopeConsent(row);
+        if (request is null)
         {
-            ScopeConsent = scopeConsent,
-        };
-        if (!request.IsValid)
-        {
-            Alert?.Invoke("无法安全定位该应用的进程身份，已取消操作。", "结束应用");
             return;
         }
 
@@ -244,7 +219,26 @@ public sealed class MainViewModel : ObservableObject, IDisposable
             ApplicationTerminationResult result = await _terminationService
                 .CloseApplicationGracefullyAsync(request);
 
-            if (result.ResidualCount > 0)
+            // P7 闭环：UI 缓存为 Allowed 但 Fresh Safety 判定 RequiresElevation（应用中途提权）时，
+            // 绝不静默失败——先询问用户是否以管理员 Helper 重试，同意才携带显式授权重执行
+            if (result.Status == TerminationStatus.RequiresElevation)
+            {
+                if (Confirm?.Invoke(
+                        $"“{row.DisplayName}”的进程以管理员权限运行，正常关闭未执行。\n"
+                        + "是否以管理员身份强制结束？\n（Windows 将弹出 UAC 确认，未保存的数据可能丢失）",
+                        "以管理员身份强制结束") == true)
+                {
+                    StatusText = "正在等待管理员授权…";
+                    result = await _terminationService.ForceTerminateViaHelperAsync(
+                        request with { AllowElevation = true });
+                }
+                else
+                {
+                    StatusText = "已取消（需要管理员权限）。";
+                    return;
+                }
+            }
+            else if (result.ResidualCount > 0)
             {
                 StatusText = $"仍有 {result.ResidualCount} 个相关进程未退出";
                 if (Confirm?.Invoke(
@@ -283,6 +277,110 @@ public sealed class MainViewModel : ObservableObject, IDisposable
         }
     }
 
+    /// <summary>
+    /// 构建带范围授权的终止请求：弱证据多进程组（Confidence &lt; High 且成员 &gt; 1）必须先经过
+    /// 专门的弱组范围确认（列出全部将操作进程），确认后才携带 ExplicitWeakGroup；
+    /// 用户取消或身份不可靠时返回 null。
+    /// </summary>
+    private TerminationRequest? BuildRequestWithScopeConsent(ApplicationRowViewModel row)
+    {
+        bool weakGroup = row.Confidence < GroupingConfidence.High && row.ProcessCount > 1;
+        TerminationScopeConsent scopeConsent = TerminationScopeConsent.Default;
+        if (weakGroup)
+        {
+            string processList = string.Join("\n", row.Processes.Select(p => $"- {p.Name}"));
+            string confidenceText = row.Confidence switch
+            {
+                GroupingConfidence.Medium => "中等",
+                GroupingConfidence.Low => "低",
+                _ => "未知",
+            };
+            Trace.WriteLine("[Kill] showing weak-group scope consent dialog");
+            if (Confirm?.Invoke(
+                    $"该应用组的关联可信度为“{confidenceText}”。\n\n"
+                    + "其中部分进程仅根据安装目录、产品信息等弱证据判断为相关，\n"
+                    + "可能并不属于同一个软件。\n\n"
+                    + $"本次将操作以下已识别进程：\n{processList}\n共 {row.ProcessCount} 个。\n\n"
+                    + "只有确认这些进程确实属于你想关闭的软件时才继续。",
+                    "确认弱关联应用组") != true)
+            {
+                Trace.WriteLine("[Kill] weak-group scope consent refused/unavailable");
+                return null;
+            }
+
+            scopeConsent = TerminationScopeConsent.ExplicitWeakGroup;
+        }
+
+        var request = new TerminationRequest(
+            row.DisplayName,
+            row.Processes.Select(p => p.Identity).ToList(),
+            DateTimeOffset.UtcNow)
+        {
+            ScopeConsent = scopeConsent,
+        };
+        if (!request.IsValid)
+        {
+            Alert?.Invoke("无法安全定位该应用的进程身份，已取消操作。", "结束应用");
+            return null;
+        }
+
+        return request;
+    }
+
+    /// <summary>
+    /// 提权终止（P7）：RequiresElevation 行的专门入口——先经显著不同的提权确认
+    /// （明确说明 UAC 弹窗与强制终止语义），用户确认后请求携带显式 AllowElevation，
+    /// 通过一次 UAC 启动的 Elevated Helper 执行（Helper 端逐目标重新验证 exact identity）。
+    /// </summary>
+    private async Task ExecuteElevatedTerminationAsync(ApplicationRowViewModel row)
+    {
+        TerminationRequest? request = BuildRequestWithScopeConsent(row);
+        if (request is null)
+        {
+            return;
+        }
+
+        string processList = string.Join("\n", row.Processes.Take(10).Select(p => $"- {p.Name}"));
+        if (row.ProcessCount > 10)
+        {
+            processList += $"\n… 等共 {row.ProcessCount} 个进程";
+        }
+
+        Trace.WriteLine("[Kill] showing elevation consent dialog");
+        if (Confirm?.Invoke(
+                $"“{row.DisplayName}”以管理员权限运行，无法正常关闭。\n\n"
+                + $"将以管理员身份强制终止以下进程：\n{processList}\n\n"
+                + "· Windows 将弹出 UAC 授权对话框（只需确认一次）\n"
+                + "· 强制终止立即生效，未保存的数据可能丢失\n"
+                + "· 取消授权则不做任何改动",
+                "以管理员身份强制结束") != true)
+        {
+            Trace.WriteLine("[Kill] elevation consent refused/unavailable");
+            return;
+        }
+
+        IsTerminationRunning = true;
+        try
+        {
+            StatusText = "正在等待管理员授权（UAC）…";
+            ApplicationTerminationResult result = await _terminationService
+                .ForceTerminateViaHelperAsync(request with { AllowElevation = true });
+            StatusText = DescribeTermination(result);
+        }
+        catch (OperationCanceledException)
+        {
+            StatusText = "结束操作已取消。";
+        }
+        catch (Exception ex)
+        {
+            StatusText = $"结束操作失败：{ex.Message}";
+        }
+        finally
+        {
+            IsTerminationRunning = false;
+        }
+    }
+
     private static string DescribeTermination(ApplicationTerminationResult r) => r.Status switch
     {
         TerminationStatus.Success => $"已结束“{r.DisplayName}”（{r.ProcessResults.Count} 个进程）。",
@@ -292,7 +390,7 @@ public sealed class MainViewModel : ObservableObject, IDisposable
         TerminationStatus.AmbiguousTarget => "目标无法唯一确定，已取消操作。",
         TerminationStatus.Blocked => "受系统保护，禁止结束。",
         TerminationStatus.Indeterminate => "安全状态未知，已阻止操作。",
-        TerminationStatus.RequiresElevation => "需要管理员权限，当前版本不执行。",
+        TerminationStatus.RequiresElevation => "需要管理员权限，可在确认后通过管理员 Helper 强制结束。",
         TerminationStatus.IdentityMismatch => "身份校验失败，已在执行任何终止动作前取消。",
         TerminationStatus.ScopeConfirmationRequired => "该应用组为弱证据分组，需在确认对话框中明确确认要操作的进程后才能结束。",
         _ => $"操作失败：{r.Message ?? "未知原因"}",

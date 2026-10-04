@@ -13,7 +13,9 @@ namespace CuinProcessEase.Core.Termination;
 /// 决策矩阵全部可单元测试：
 /// - 0 组匹配 → AlreadyExited / TargetChanged（PID 被复用）——绝不仅因 exe path 相同就匹配新实例；
 /// - ≥2 组匹配 → AmbiguousTarget；
-/// - Blocked / Indeterminate / RequiresElevation → 拒绝执行；
+/// - Blocked / Indeterminate → 拒绝执行；
+/// - RequiresElevation → 默认拒绝；仅当请求携带用户显式 AllowElevation（P7）时放行，
+///   计划标记 RequiresElevation，由 Elevated Helper 管线执行；
 /// - 候选中出现 Snapshot StartTime 不可靠的进程 → fail-closed 取消；
 /// - P6.3/P6.4 破坏性范围门禁：组 Confidence &lt; High（Medium 弱证据组）时候选收窄为请求锚点成员，
 ///   绝不自动扩展到组内新增成员；High / VeryHigh 组 + Default 请求才允许全组候选（含新 helper）；
@@ -43,6 +45,12 @@ public static class TerminationPlanner
 
         /// <summary>有序候选进程（Root 优先，其余按 PID；Proceed 时非空）。</summary>
         public IReadOnlyList<ProcessSnapshot> Candidates { get; init; } = Array.Empty<ProcessSnapshot>();
+
+        /// <summary>
+        /// 目标组 Fresh Safety 为 RequiresElevation 且请求携带 AllowElevation 时为 true
+        /// （P7）：执行端必须走 Elevated Helper 管线（Helper 端逐目标重新验证 exact identity）。
+        /// </summary>
+        public bool RequiresElevation { get; init; }
     }
 
     /// <summary>
@@ -106,8 +114,11 @@ public static class TerminationPlanner
 
         ApplicationGroup target = matched[0];
 
-        // Fresh Safety 门禁（唯一执行入口；非 Allowed 一律拒绝）
+        // Fresh Safety 门禁（唯一执行入口；非 Allowed 一律拒绝。
+        // P7 例外：RequiresElevation 且请求携带用户显式 AllowElevation 授权时放行规划，
+        // 由 Elevated Helper 管线执行（Helper 端重新验证身份），主程序自身仍零提权。）
         ApplicationSafetyResult safety = assessFreshSafety(target);
+        bool requiresElevation = false;
         switch (safety.Decision)
         {
             case SafetyDecision.Blocked:
@@ -117,8 +128,14 @@ public static class TerminationPlanner
                 return Cancel(TerminationStatus.Indeterminate, TerminationFailureReason.SafetyRejected,
                     $"“{target.Identity.DisplayName}”安全状态未知，已阻止操作。");
             case SafetyDecision.RequiresElevation:
-                return Cancel(TerminationStatus.RequiresElevation, TerminationFailureReason.SafetyRejected,
-                    $"“{target.Identity.DisplayName}”需要管理员权限，当前阶段不提供提权。");
+                if (!request.AllowElevation)
+                {
+                    return Cancel(TerminationStatus.RequiresElevation, TerminationFailureReason.SafetyRejected,
+                        $"“{target.Identity.DisplayName}”需要管理员权限，当前未获得用户提权授权。");
+                }
+
+                requiresElevation = true;
+                break;
             case SafetyDecision.Allowed:
                 break;
             default:
@@ -185,11 +202,17 @@ public static class TerminationPlanner
                 : $"目标组“{target.Identity.DisplayName}”（请求确认的 {candidates.Count} 个成员）。";
         }
 
+        if (requiresElevation)
+        {
+            message += "该组需要管理员权限，将通过 Elevated Helper 执行（Helper 端重新验证每个目标身份）。";
+        }
+
         return new TerminationPlan
         {
             Proceed = true,
             TargetGroup = target,
             Candidates = candidates,
+            RequiresElevation = requiresElevation,
             Message = message,
         };
     }

@@ -1,4 +1,5 @@
 using System.Runtime.InteropServices;
+using CuinProcessEase.Core.Elevated;
 using CuinProcessEase.Windows.Native;
 
 namespace CuinProcessEase.Windows.Termination;
@@ -6,8 +7,10 @@ namespace CuinProcessEase.Windows.Termination;
 /// <summary>
 /// 真实 Win32 实现：直接 P/Invoke NativeMethods。
 /// Win32 错误码在 SetLastError 调用后立即读取，避免被中间代码污染。
+/// 同时实现主程序引擎的 internal ITerminationInterop 与 Elevated Helper 的
+/// public <see cref="IElevatedKillInterop"/>（方法签名一致，零重复实现）。
 /// </summary>
-internal sealed class Win32TerminationInterop : ITerminationInterop
+public sealed class Win32TerminationInterop : ITerminationInterop, IElevatedKillInterop
 {
     /// <inheritdoc />
     public IntPtr OpenProcess(uint desiredAccess, bool inheritHandle, uint processId, out int win32Error)

@@ -12,7 +12,9 @@ namespace CuinProcessEase.Windows.Tests;
 /// 绝不结束系统进程或用户现有程序。
 /// 覆盖：优雅 WM_CLOSE / IgnoreClose 残留 / Force / 父子同组 / 单进程 Force 不伤同组 /
 /// 旧 Request 不杀新实例 / 差 1 FILETIME tick 的请求拒绝 / 已退出安全处理。
+/// 与其他真实进程测试同 Collection 串行（TestApp 同 exe 聚组会波及并行测试的目标）。
 /// </summary>
+[Collection("TerminationIntegration")]
 public sealed class ProcessTerminationServiceTests
 {
     private static readonly ProcessTerminationService Service = new();

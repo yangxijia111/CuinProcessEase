@@ -1,8 +1,10 @@
+using CuinProcessEase.Core.Elevated;
 using CuinProcessEase.Core.Grouping;
 using CuinProcessEase.Core.Interfaces;
 using CuinProcessEase.Core.Models;
 using CuinProcessEase.Core.Safety;
 using CuinProcessEase.Core.Termination;
+using CuinProcessEase.Windows.Elevation;
 using CuinProcessEase.Windows.Native;
 
 namespace CuinProcessEase.Windows.Termination;
@@ -51,23 +53,27 @@ public sealed class ProcessTerminationService : IProcessTerminationService
     private readonly IProcessSnapshotService _snapshotService;
     private readonly IProcessSafetyService _freshSafety;
     private readonly ITerminationInterop _interop;
+    private readonly IElevatedHelperClient _helperClient;
 
     public ProcessTerminationService()
         : this(
             new Services.ProcessSnapshotService(),
             new Safety.ProcessSafetyService(),
-            new Win32TerminationInterop())
+            new Win32TerminationInterop(),
+            new ElevatedHelperClient())
     {
     }
 
     internal ProcessTerminationService(
         IProcessSnapshotService snapshotService,
         IProcessSafetyService freshSafety,
-        ITerminationInterop interop)
+        ITerminationInterop interop,
+        IElevatedHelperClient? helperClient = null)
     {
         _snapshotService = snapshotService;
         _freshSafety = freshSafety;
         _interop = interop;
+        _helperClient = helperClient ?? new ElevatedHelperClient();
     }
 
     /// <inheritdoc />
@@ -84,6 +90,146 @@ public sealed class ProcessTerminationService : IProcessTerminationService
     public Task<ApplicationTerminationResult> ForceTerminateProcessAsync(
         TerminationRequest request, CancellationToken cancellationToken = default)
         => Task.Run(() => ExecuteSingleProcessAsync(request, cancellationToken), cancellationToken);
+
+    /// <inheritdoc />
+    public Task<ApplicationTerminationResult> ForceTerminateViaHelperAsync(
+        TerminationRequest request, CancellationToken cancellationToken = default)
+        => Task.Run(() => ExecuteViaHelperAsync(request, cancellationToken), cancellationToken);
+
+    // ================= Elevated Helper 执行管线（P7） =================
+
+    /// <summary>
+    /// 通过 Elevated Helper 强制终止：主程序保持普通权限，Fresh Snapshot / Grouping / Safety /
+    /// 弱组范围门禁照常在主程序端执行；请求必须携带用户显式 AllowElevation 授权
+    /// （Planner 对 RequiresElevation + AllowElevation 放行）；候选打包成单批请求，
+    /// 由一次 UAC 启动的 Helper 逐目标重新验证 exact CreationTime 后 TerminateProcess；
+    /// 主程序端随后执行 Final Rescan（只验证，普通权限读不到时 fail-closed 视为残留）。
+    /// Helper 管线不执行残留清理轮（每轮都要 UAC，绝不自动循环提权，残留交用户决策）。
+    /// </summary>
+    private async Task<ApplicationTerminationResult> ExecuteViaHelperAsync(
+        TerminationRequest request, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        if (!request.IsValid)
+        {
+            return Terminal(request, TerminationStatus.Failed, TerminationFailureReason.UnreliableIdentity,
+                "终止请求无效（缺少预期身份）。");
+        }
+
+        if (!request.AllowElevation)
+        {
+            // 防御：未携带显式提权授权的请求绝不进入 Helper 管线
+            return Terminal(request, TerminationStatus.RequiresElevation, TerminationFailureReason.SafetyRejected,
+                "该请求未携带用户提权授权，拒绝通过管理员 Helper 执行。");
+        }
+
+        var messages = new List<string>();
+
+        // ---- Fresh Snapshot + Grouping + Planning（AllowElevation 让 RequiresElevation 组放行） ----
+        cancellationToken.ThrowIfCancellationRequested();
+        ProcessSnapshotCollection snapshot = await _snapshotService.CaptureAsync(cancellationToken).ConfigureAwait(false);
+        IReadOnlyList<ApplicationGroup> groups = ApplicationGroupingEngine.Group(snapshot);
+        TerminationPlanner.TerminationPlan plan = TerminationPlanner.Plan(
+            request, groups, snapshot.Processes, g => _freshSafety.Assess(g));
+        if (!plan.Proceed)
+        {
+            return PlanRejected(request, plan);
+        }
+
+        messages.Add(plan.Message ?? string.Empty);
+
+        // Planner 已保证候选 StartTime 非 null（fail-closed）；此处防御性复核
+        if (plan.Candidates.Any(p => p.StartTimeUtc is null))
+        {
+            return Terminal(request, TerminationStatus.Failed, TerminationFailureReason.UnreliableIdentity,
+                "候选存在无法确认启动时间的成员，已拒绝操作。");
+        }
+
+        var identityByPid = plan.Candidates.ToDictionary(p => p.ProcessId, p => p.Identity);
+        var nameByPid = plan.Candidates.ToDictionary(p => p.ProcessId, p => p.Name);
+        var targets = plan.Candidates
+            .Select(p => new ElevatedKillTarget(p.ProcessId, p.StartTimeUtc!.Value.ToFileTimeUtc()))
+            .ToList();
+
+        // ---- 单批 Helper 请求（一次 UAC），Helper 端逐目标重新验证 exact identity ----
+        var helperRequest = new ElevatedKillRequest(
+            ElevatedKillRequest.KillOperation,
+            $"elev-{Guid.NewGuid():N}",
+            targets);
+
+        ElevatedKillResponse response;
+        try
+        {
+            response = await _helperClient.KillAsync(helperRequest, cancellationToken).ConfigureAwait(false);
+        }
+        catch (ElevatedHelperException ex)
+        {
+            string userMessage = ex.Reason switch
+            {
+                ElevatedHelperFailure.UacCancelled => "已取消管理员授权，未执行任何终止动作。",
+                ElevatedHelperFailure.HelperMissing => $"管理员 Helper 不可用：{ex.Message}",
+                ElevatedHelperFailure.ConnectTimeout => ex.Message,
+                _ => $"管理员 Helper 调用失败：{ex.Message}",
+            };
+            return Terminal(request, TerminationStatus.Failed, TerminationFailureReason.ExecutionError, userMessage);
+        }
+
+        // ---- Helper 结果映射（按 PID 找回 exact identity 与进程名） ----
+        var attempts = new List<ProcessTerminationResult>(response.Results.Count);
+        foreach (ElevatedKillTargetResult helperResult in response.Results)
+        {
+            if (!identityByPid.TryGetValue(helperResult.ProcessId, out ProcessIdentity? identity))
+            {
+                // 协议异常：响应包含请求之外的 PID（fail-closed 记录为失败）
+                attempts.Add(new ProcessTerminationResult
+                {
+                    Pid = helperResult.ProcessId,
+                    ExpectedIdentity = new ProcessIdentity(helperResult.ProcessId, null),
+                    ProcessName = helperResult.ProcessId.ToString(),
+                    Result = ProcessTerminationStatus.Failed,
+                    Message = "Helper 响应包含请求之外的 PID（协议异常）。",
+                });
+                continue;
+            }
+
+            attempts.Add(ElevatedOutcomeMapper.ToProcessResult(helperResult, identity, nameByPid[helperResult.ProcessId]));
+        }
+
+        messages.Add("已通过管理员 Helper 执行（Helper 端逐目标重新验证身份）。");
+
+        // ---- Final Rescan：主程序普通权限只读验证（读不到 → Uncertain → fail-closed 残留） ----
+        var targetedIdentities = new HashSet<ProcessIdentity>(plan.Candidates.Select(p => p.Identity));
+        IReadOnlyList<FinalIdentityVerification> verifications = await VerifyFinalIdentityStatesAsync(
+            targetedIdentities, cancellationToken).ConfigureAwait(false);
+        IReadOnlyList<ProcessTerminationResult> finalResults = TerminationResultReconciler.ApplyFinalRescan(
+            targetedIdentities, TerminationResultReconciler.LatestResultByIdentity(attempts), verifications);
+        int unresolvedCount = verifications.Count(v =>
+            v.State is FinalIdentityState.Surviving or FinalIdentityState.Uncertain);
+        messages.Add(unresolvedCount == 0
+            ? "所有已确认目标身份均已退出。"
+            : $"Final Rescan 确认仍有 {unresolvedCount} 个目标身份存在或无法确认退出。");
+
+        (TerminationStatus status, TerminationFailureReason reason) =
+            TerminationResultReconciler.Summarize(finalResults);
+        List<ProcessIdentity> residual = finalResults
+            .Where(r => !r.ConfirmedExited)
+            .Select(r => r.ExpectedIdentity)
+            .ToList();
+        if (residual.Count > 0)
+        {
+            messages.Add($"仍有 {residual.Count} 个相关进程未退出。");
+        }
+
+        return new ApplicationTerminationResult
+        {
+            Status = status,
+            FailureReason = reason,
+            DisplayName = request.ExpectedDisplayName,
+            ProcessResults = finalResults,
+            ResidualIdentities = residual,
+            Message = string.Join(" ", messages.Where(m => !string.IsNullOrWhiteSpace(m)).Distinct()),
+        };
+    }
 
     // ================= 应用组执行管线 =================
 
@@ -111,28 +257,7 @@ public sealed class ProcessTerminationService : IProcessTerminationService
 
             if (!plan.Proceed)
             {
-                // AlreadyExited 终态：为每个预期身份生成逐进程结果，便于 UI/日志追溯
-                if (plan.Status == TerminationStatus.AlreadyExited)
-                {
-                    return new ApplicationTerminationResult
-                    {
-                        Status = plan.Status,
-                        FailureReason = plan.FailureReason,
-                        DisplayName = request.ExpectedDisplayName,
-                        ProcessResults = request.ExpectedMemberIdentities.Select(i => new ProcessTerminationResult
-                        {
-                            Pid = i.ProcessId,
-                            ExpectedIdentity = i,
-                            ProcessName = i.ToString(),
-                            Result = ProcessTerminationStatus.AlreadyExited,
-                            Message = "Fresh 快照中未发现该进程（已退出）。",
-                        }).ToList(),
-                        ResidualIdentities = Array.Empty<ProcessIdentity>(),
-                        Message = plan.Message,
-                    };
-                }
-
-                return Terminal(request, plan.Status, plan.FailureReason, plan.Message);
+                return PlanRejected(request, plan);
             }
 
             messages.Add(plan.Message ?? string.Empty);
@@ -743,6 +868,33 @@ public sealed class ProcessTerminationService : IProcessTerminationService
     }
 
     // ================= 辅助 =================
+
+    /// <summary>规划拒绝的统一出口：AlreadyExited 终态为每个预期身份生成逐进程结果，便于 UI/日志追溯。</summary>
+    private static ApplicationTerminationResult PlanRejected(
+        TerminationRequest request, TerminationPlanner.TerminationPlan plan)
+    {
+        if (plan.Status == TerminationStatus.AlreadyExited)
+        {
+            return new ApplicationTerminationResult
+            {
+                Status = plan.Status,
+                FailureReason = plan.FailureReason,
+                DisplayName = request.ExpectedDisplayName,
+                ProcessResults = request.ExpectedMemberIdentities.Select(i => new ProcessTerminationResult
+                {
+                    Pid = i.ProcessId,
+                    ExpectedIdentity = i,
+                    ProcessName = i.ToString(),
+                    Result = ProcessTerminationStatus.AlreadyExited,
+                    Message = "Fresh 快照中未发现该进程（已退出）。",
+                }).ToList(),
+                ResidualIdentities = Array.Empty<ProcessIdentity>(),
+                Message = plan.Message,
+            };
+        }
+
+        return Terminal(request, plan.Status, plan.FailureReason, plan.Message);
+    }
 
     private static ApplicationTerminationResult Canceled(
         TerminationRequest request,

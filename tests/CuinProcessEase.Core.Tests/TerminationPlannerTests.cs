@@ -343,4 +343,72 @@ public sealed class TerminationPlannerTests
         Assert.Equal(TerminationStatus.Failed, plan.Status);
         Assert.Equal(TerminationFailureReason.UnreliableIdentity, plan.FailureReason);
     }
+
+    // ================= P7：提权授权（AllowElevation） =================
+
+    private static readonly Func<ApplicationGroup, ApplicationSafetyResult> RequiresElevationSafety =
+        _ => SafetyOf(SafetyDecision.RequiresElevation);
+
+    [Fact]
+    public void 规划_RequiresElevation未授权_拒绝执行()
+    {
+        var target = Snap(100, "app.exe");
+        var group = Group("Test App", [target]);
+
+        var plan = TerminationPlanner.Plan(Request(target), [group], [target], RequiresElevationSafety);
+
+        Assert.False(plan.Proceed);
+        Assert.Equal(TerminationStatus.RequiresElevation, plan.Status);
+        Assert.Equal(TerminationFailureReason.SafetyRejected, plan.FailureReason);
+    }
+
+    [Fact]
+    public void 规划_RequiresElevation携带显式AllowElevation_放行并标记()
+    {
+        var target = Snap(100, "app.exe");
+        var group = Group("Test App", [target]);
+        var request = Request(target) with { AllowElevation = true };
+
+        var plan = TerminationPlanner.Plan(request, [group], [target], RequiresElevationSafety);
+
+        Assert.True(plan.Proceed);
+        Assert.True(plan.RequiresElevation);
+        Assert.Equal([100], plan.Candidates.Select(p => p.ProcessId));
+        Assert.Contains("管理员", plan.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void 规划_Allowed组携带AllowElevation_计划不标记提权()
+    {
+        // 普通 Allowed 组即使误带 AllowElevation 也走常规管线（标志只反映 Fresh Safety）
+        var target = Snap(100, "app.exe");
+        var group = Group("Test App", [target]);
+        var request = Request(target) with { AllowElevation = true };
+
+        var plan = TerminationPlanner.Plan(request, [group], [target], Allowed);
+
+        Assert.True(plan.Proceed);
+        Assert.False(plan.RequiresElevation);
+    }
+
+    [Fact]
+    public void 规划_提权弱组_仍需ExplicitWeakGroup授权_范围门禁不因提权放松()
+    {
+        var root = Snap(100, "app.exe");
+        var other = Snap(200, "helper.exe");
+        var group = Group("Test App", [root, other], [root], GroupingConfidence.Medium);
+
+        // 未携带弱组授权 → ScopeConfirmationRequired（即使已 AllowElevation）
+        var noConsent = Request(root) with { AllowElevation = true };
+        var rejected = TerminationPlanner.Plan(noConsent, [group], [root, other], RequiresElevationSafety);
+        Assert.False(rejected.Proceed);
+        Assert.Equal(TerminationStatus.ScopeConfirmationRequired, rejected.Status);
+
+        // 携带弱组授权 → 放行且候选收窄为锚点成员
+        var consent = WeakConsentRequest(root) with { AllowElevation = true };
+        var plan = TerminationPlanner.Plan(consent, [group], [root, other], RequiresElevationSafety);
+        Assert.True(plan.Proceed);
+        Assert.True(plan.RequiresElevation);
+        Assert.Equal([100], plan.Candidates.Select(p => p.ProcessId));
+    }
 }

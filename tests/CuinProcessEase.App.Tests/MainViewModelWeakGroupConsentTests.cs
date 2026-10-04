@@ -60,6 +60,8 @@ public sealed class MainViewModelWeakGroupConsentTests : IDisposable
 
         public List<TerminationRequest> ForceRequests { get; } = [];
 
+        public List<TerminationRequest> HelperRequests { get; } = [];
+
         /// <summary>Graceful 返回的残留身份数量（>0 触发 UI 的 Force 确认链）。</summary>
         public int GracefulResidualCount { get; set; }
 
@@ -102,6 +104,13 @@ public sealed class MainViewModelWeakGroupConsentTests : IDisposable
         public Task<ApplicationTerminationResult> ForceTerminateProcessAsync(
             TerminationRequest request, CancellationToken cancellationToken = default)
             => throw new InvalidOperationException("弱组 consent 测试不应触达单进程管线。");
+
+        public Task<ApplicationTerminationResult> ForceTerminateViaHelperAsync(
+            TerminationRequest request, CancellationToken cancellationToken = default)
+        {
+            HelperRequests.Add(request);
+            return Task.FromResult(Result(request, TerminationStatus.Success, 0));
+        }
     }
 
     // ================= 设施 =================

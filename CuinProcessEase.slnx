@@ -2,9 +2,11 @@
   <Folder Name="/src/">
     <Project Path="src/CuinProcessEase.App/CuinProcessEase.App.csproj" />
     <Project Path="src/CuinProcessEase.Core/CuinProcessEase.Core.csproj" />
+    <Project Path="src/CuinProcessEase.ElevatedHelper/CuinProcessEase.ElevatedHelper.csproj" />
     <Project Path="src/CuinProcessEase.Windows/CuinProcessEase.Windows.csproj" />
   </Folder>
   <Folder Name="/tests/">
+    <Project Path="tests/CuinProcessEase.App.Tests/CuinProcessEase.App.Tests.csproj" />
     <Project Path="tests/CuinProcessEase.Core.Tests/CuinProcessEase.Core.Tests.csproj" />
     <Project Path="tests/CuinProcessEase.TerminationTestApp/CuinProcessEase.TerminationTestApp.csproj" />
     <Project Path="tests/CuinProcessEase.Windows.Tests/CuinProcessEase.Windows.Tests.csproj" />

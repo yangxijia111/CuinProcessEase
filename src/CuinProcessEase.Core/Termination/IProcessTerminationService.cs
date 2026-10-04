@@ -38,4 +38,13 @@ public interface IProcessTerminationService
     /// </summary>
     Task<ApplicationTerminationResult> ForceTerminateProcessAsync(
         TerminationRequest request, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// 通过 Elevated Helper 强制终止（P7）：请求必须携带用户显式
+    /// <see cref="TerminationRequest.AllowElevation"/> 授权；主程序自身保持普通权限，
+    /// 由一次 UAC 启动的 Helper 对每个目标重新验证 exact CreationTime 后终止。
+    /// 主程序端仍执行 Fresh Snapshot / Grouping / Safety / 弱组范围门禁与 Final Rescan。
+    /// </summary>
+    Task<ApplicationTerminationResult> ForceTerminateViaHelperAsync(
+        TerminationRequest request, CancellationToken cancellationToken = default);
 }

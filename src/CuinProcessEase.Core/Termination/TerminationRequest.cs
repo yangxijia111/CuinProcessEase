@@ -24,6 +24,14 @@ public sealed record TerminationRequest(
     /// </summary>
     public TerminationScopeConsent ScopeConsent { get; init; } = TerminationScopeConsent.Default;
 
+    /// <summary>
+    /// 提权授权（P7）：仅当用户在专门的提权确认对话框明确同意后才为 true；
+    /// 默认 false，绝不自动提权。为 true 时目标组 Fresh Safety 为
+    /// RequiresElevation 也允许规划继续（由 <see cref="Elevated"/> 命名空间下的
+    /// Helper 管线执行，Helper 端必须重新验证每个 exact identity）。
+    /// </summary>
+    public bool AllowElevation { get; init; }
+
     /// <summary>校验请求基本合法（非空身份列表）。</summary>
     public bool IsValid
         => !string.IsNullOrWhiteSpace(ExpectedDisplayName)

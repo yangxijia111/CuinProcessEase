@@ -1,18 +1,17 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
+    <!-- 提权 Helper：无窗口、短生命周期、单请求处理完即退出 -->
     <OutputType>WinExe</OutputType>
     <TargetFramework>net10.0-windows</TargetFramework>
-    <UseWPF>true</UseWPF>
-    <AssemblyName>CuinProcessEase.App</AssemblyName>
-    <RootNamespace>CuinProcessEase.App</RootNamespace>
+    <AssemblyName>CuinProcessEase.ElevatedHelper</AssemblyName>
+    <RootNamespace>CuinProcessEase.ElevatedHelper</RootNamespace>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
   </PropertyGroup>
 
   <ItemGroup>
     <ProjectReference Include="..\CuinProcessEase.Core\CuinProcessEase.Core.csproj" />
     <ProjectReference Include="..\CuinProcessEase.Windows\CuinProcessEase.Windows.csproj" />
-    <!-- P7：Helper exe 部署到主程序同目录（ElevatedHelperClient 按同目录定位） -->
-    <ProjectReference Include="..\CuinProcessEase.ElevatedHelper\CuinProcessEase.ElevatedHelper.csproj" />
   </ItemGroup>
 
 </Project>
