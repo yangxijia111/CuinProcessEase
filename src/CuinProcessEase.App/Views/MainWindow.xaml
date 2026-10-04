@@ -16,6 +16,7 @@
         <converters:NullToCollapsedConverter x:Key="NullToCollapsed" />
         <converters:NullToVisibleConverter x:Key="NullToVisible" />
         <converters:EmptyToVisibleConverter x:Key="EmptyToVisible" />
+        <converters:BoolToVisibilityConverter x:Key="BoolToVis" />
 
         <!-- 应用行模板：图标 + 名称 + 进程数 + CPU + 内存 + 安全 + 可信度 -->
         <DataTemplate x:Key="AppRowTemplate">
@@ -139,7 +140,8 @@
             <Grid Grid.Column="2"
                   Width="320"
                   VerticalAlignment="Center">
-                <TextBox Style="{DynamicResource SearchBox}"
+                <TextBox x:Name="SearchBox"
+                         Style="{DynamicResource SearchBox}"
                          Text="{Binding SearchText, UpdateSourceTrigger=PropertyChanged}" />
                 <TextBlock Text="搜索应用、进程、路径…"
                            Margin="12,0,0,0"
@@ -361,6 +363,24 @@
                         </ItemsPanelTemplate>
                     </ListBox.ItemsPanel>
                 </ListBox>
+
+                <!-- Phase 9：空状态覆盖层（加载中 / 搜索或筛选无匹配） -->
+                <Border Grid.Row="1"
+                        Background="{DynamicResource Brush.Window.Background}"
+                        Visibility="{Binding IsListEmpty, Converter={StaticResource BoolToVis}}">
+                    <StackPanel HorizontalAlignment="Center"
+                                VerticalAlignment="Center">
+                        <TextBlock Text="{Binding EmptyStateText}"
+                                   Style="{DynamicResource SecondaryText}"
+                                   FontSize="15"
+                                   HorizontalAlignment="Center" />
+                        <TextBlock Style="{DynamicResource SecondaryText}"
+                                   FontSize="12"
+                                   Margin="0,6,0,0"
+                                   HorizontalAlignment="Center"
+                                   Text="快捷键：Ctrl+F 搜索 · F5 刷新 · Space 暂停 · Delete 结束所选" />
+                    </StackPanel>
+                </Border>
             </Grid>
 
             <!-- ============ 详情面板 ============ -->

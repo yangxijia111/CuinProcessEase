@@ -94,6 +94,10 @@ public sealed class MainViewModel : ObservableObject, IDisposable
         ToggleThemeCommand = new RelayCommand(_ => IsDarkTheme = !IsDarkTheme);
         KillCommand = new AsyncRelayCommand(_ => ExecuteTerminationAsync());
 
+        // Phase 9 快捷键命令：F5 立即刷新（暂停时也可手动刷新一轮）；Ctrl+F 聚焦搜索（由窗口落焦）
+        RefreshNowCommand = new RelayCommand(_ => _ = RunTickAsync(_cts.Token));
+        FocusSearchCommand = new RelayCommand(_ => FocusSearchRequested?.Invoke());
+
         // 刷新循环：立即执行首轮，之后每秒一轮（在线程池运行）
         _refreshLoop = Task.Run(() => RunRefreshLoopAsync(_cts.Token));
     }
@@ -146,6 +150,15 @@ public sealed class MainViewModel : ObservableObject, IDisposable
     }
 
     public AsyncRelayCommand KillCommand { get; }
+
+    /// <summary>F5：立即执行一轮刷新（PauseRefresh 状态下也允许手动刷新）。</summary>
+    public RelayCommand RefreshNowCommand { get; }
+
+    /// <summary>Ctrl+F：请求窗口把焦点移入搜索框（焦点操作属视图层）。</summary>
+    public RelayCommand FocusSearchCommand { get; }
+
+    /// <summary>窗口订阅后执行 SearchBox.Focus()。</summary>
+    public event Action? FocusSearchRequested;
 
     /// <summary>结束按钮文案：按 Fresh 之外的最后已知 Safety 状态展示（真正门禁在终止引擎内重新验证）。</summary>
     public string KillButtonText => IsTerminationRunning
@@ -714,6 +727,32 @@ public sealed class MainViewModel : ObservableObject, IDisposable
         desired.Sort((a, b) => comparison(ToSortKey(a), ToSortKey(b)));
 
         SyncCollection(Applications, desired, LockList);
+
+        // Phase 9：空状态（加载中 / 无匹配），随列表同步通知
+        OnPropertyChanged(nameof(IsListEmpty));
+        OnPropertyChanged(nameof(EmptyStateText));
+    }
+
+    /// <summary>可见列表是否为空（空状态覆盖层显示条件）。</summary>
+    public bool IsListEmpty => Applications.Count == 0;
+
+    /// <summary>空状态文案：启动加载中 vs 搜索/筛选无匹配。</summary>
+    public string EmptyStateText
+    {
+        get
+        {
+            // 完全无行 + 无搜索 + 默认页 = 首轮扫描尚未完成
+            if (_rowsByKey.Count == 0
+                && string.IsNullOrWhiteSpace(SearchText)
+                && SelectedTab == ApplicationListTab.All)
+            {
+                return "正在扫描进程…";
+            }
+
+            return string.IsNullOrWhiteSpace(SearchText)
+                ? "当前筛选条件下没有应用。"
+                : $"没有匹配“{SearchText.Trim()}”的应用。";
+        }
     }
 
     private static ApplicationSortKey ToSortKey(ApplicationRowViewModel row) => new(

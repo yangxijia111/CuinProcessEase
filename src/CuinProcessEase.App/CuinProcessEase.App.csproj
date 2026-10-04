@@ -6,6 +6,8 @@
     <UseWPF>true</UseWPF>
     <AssemblyName>CuinProcessEase.App</AssemblyName>
     <RootNamespace>CuinProcessEase.App</RootNamespace>
+    <!-- Phase 9：应用图标（多尺寸 ico） -->
+    <ApplicationIcon>App.ico</ApplicationIcon>
   </PropertyGroup>
 
   <ItemGroup>
