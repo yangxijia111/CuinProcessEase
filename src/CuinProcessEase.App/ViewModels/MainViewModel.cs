@@ -47,6 +47,9 @@ public sealed class MainViewModel : ObservableObject, IDisposable
     private readonly CancellationTokenSource _cts = new();
     private readonly Task _refreshLoop;
 
+    /// <summary>每应用最近 60 秒资源历史（P8 图表；StableKey 仅用于展示连续性，不入终止链路）。</summary>
+    private readonly Core.Resources.ResourceHistoryStore _resourceHistory = new();
+
     /// <summary>全部应用行（含默认隐藏的系统行），Key = 稳定标识。</summary>
     private readonly Dictionary<string, ApplicationRowViewModel> _rowsByKey = new(StringComparer.Ordinal);
     private List<ApplicationGroup> _lastGroups = [];
@@ -112,6 +115,8 @@ public sealed class MainViewModel : ObservableObject, IDisposable
                 OnPropertyChanged(nameof(KillButtonText));
                 OnPropertyChanged(nameof(KillButtonEnabled));
                 OnPropertyChanged(nameof(KillButtonToolTip));
+                // 选中切换立即刷新该行的资源历史（图表在详情面板，只刷选中行）
+                _selectedRow?.UpdateHistory(_resourceHistory.TryGet(_selectedRow.StableKey));
             }
         }
     }
@@ -592,6 +597,20 @@ public sealed class MainViewModel : ObservableObject, IDisposable
         IReadOnlyDictionary<int, ProcessResourceSample> resources = _sampler.Sample(snapshot);
         SystemResourceSample system = _systemMonitor.Sample();
 
+        // P8：每应用追加一秒的资源历史（固定 60 样本环形缓冲，内存恒定）；
+        // 行消失的应用历史随之清理（Retain），长期运行不泄漏
+        var timestamp = DateTimeOffset.UtcNow;
+        foreach (ApplicationGroup group in groups)
+        {
+            ApplicationResourceAggregator.GroupResource aggregated =
+                ApplicationResourceAggregator.Aggregate(group, resources);
+            _resourceHistory.Append(
+                ApplicationStableKey.Compute(group),
+                new Core.Resources.ResourceSample(timestamp, aggregated.CpuPercent, aggregated.MemoryBytes));
+        }
+
+        _resourceHistory.Retain(new HashSet<string>(groups.Select(ApplicationStableKey.Compute)));
+
         stopwatch.Stop();
         long scanMs = stopwatch.ElapsedMilliseconds;
 
@@ -651,6 +670,9 @@ public sealed class MainViewModel : ObservableObject, IDisposable
         }
 
         _lastGroups = groups.ToList();
+
+        // P8：刷新选中行的资源图表（每秒一次；未选中行零开销）
+        SelectedRow?.UpdateHistory(_resourceHistory.TryGet(SelectedRow.StableKey));
 
         SyncVisible();
 

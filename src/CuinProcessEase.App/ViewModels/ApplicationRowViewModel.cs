@@ -165,6 +165,82 @@ public sealed class ApplicationRowViewModel : ObservableObject
     /// <summary>组内进程行（详情面板；键为 ProcessIdentity，原地更新）。</summary>
     public ObservableCollection<ProcessRowViewModel> Processes { get; }
 
+    // ---- Phase 8：最近 60 秒资源历史（仅详情面板展示；数据在 MainViewModel 维护的 store） ----
+
+    private IReadOnlyList<double?>? _cpuHistory;
+    public IReadOnlyList<double?>? CpuHistory
+    {
+        get => _cpuHistory;
+        private set
+        {
+            _cpuHistory = value;
+            OnPropertyChanged(nameof(CpuHistory));
+        }
+    }
+
+    private IReadOnlyList<double?>? _memoryHistory;
+    public IReadOnlyList<double?>? MemoryHistory
+    {
+        get => _memoryHistory;
+        private set
+        {
+            _memoryHistory = value;
+            OnPropertyChanged(nameof(MemoryHistory));
+        }
+    }
+
+    private double? _peakCpu;
+    public double? PeakCpu
+    {
+        get => _peakCpu;
+        private set
+        {
+            if (SetProperty(ref _peakCpu, value))
+            {
+                OnPropertyChanged(nameof(PeakCpuText));
+            }
+        }
+    }
+
+    public string PeakCpuText => PeakCpu is { } cpu ? $"{cpu:F1}%" : "--";
+
+    private long? _peakMemory;
+    public long? PeakMemory
+    {
+        get => _peakMemory;
+        private set
+        {
+            if (SetProperty(ref _peakMemory, value))
+            {
+                OnPropertyChanged(nameof(PeakMemoryText));
+            }
+        }
+    }
+
+    public string PeakMemoryText => FormatBytes(PeakMemory);
+
+    /// <summary>
+    /// 刷新资源历史展示（最近 60 秒环形缓冲快照 + 窗口峰值）。
+    /// MainViewModel 仅对当前选中行调用（图表只在详情面板可见，未选中行不消耗 UI 开销）。
+    /// </summary>
+    public void UpdateHistory(Core.Resources.ResourceHistoryRing? history)
+    {
+        if (history is null)
+        {
+            CpuHistory = null;
+            MemoryHistory = null;
+            PeakCpu = null;
+            PeakMemory = null;
+            return;
+        }
+
+        IReadOnlyList<Core.Resources.ResourceSample> samples = history.ToListTimeOrdered();
+        CpuHistory = samples.Select(s => s.CpuPercent).ToArray();
+        MemoryHistory = samples.Select(s => s.MemoryBytes is { } bytes ? (double?)bytes : null).ToArray();
+        PeakCpu = history.PeakCpuPercent();
+        PeakMemory = history.PeakMemoryBytes();
+    }
+
     private bool _isSelected;
     public bool IsSelected
     {
