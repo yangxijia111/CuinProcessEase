@@ -72,3 +72,6 @@ $RECYCLE.BIN/
 
 # ---------- 诊断 / 临时脚本 ----------
 .diag/
+
+# Phase 10 发布产物（Portable zip 与压测采样不入库）
+release/
